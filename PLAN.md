@@ -18,21 +18,21 @@ ocs <project-path>
   ├─ load project config   <path>/.ocs/config.json          (UNTRUSTED)
   ├─ merge with per-key permissions + path containment     (fail closed)
   ├─ validate the compiled policy                          (fail closed)
-  ├─ write to $XDG_RUNTIME_DIR/ocs/<pid>.json, mode 0600, outside the project
-  ├─ chdir to project, exec: srt --settings <abs> opencode
-  └─ remove temp file on exit / signal; propagate exit code
+  ├─ hand the compiled policy to the sandbox runtime as an in-memory object
+  ├─ chdir to project, spawn: opencode [args…] under the resulting wrapper
+  └─ await exit; call reset(); propagate exit code
 ```
 
 `ocs` never touches `bwrap` directly. Everything security-relevant past the merge
-layer belongs to `srt`, and staying behind its CLI keeps us insulated from an API
-it documents as unstable.
+layer belongs to `srt`, consumed as a **library** behind a narrow `SandboxRunner`
+interface so the choice stays reversible. The policy object never touches disk.
 
 ### Decisions already taken
 
 | Decision | Choice | Why |
 | --- | --- | --- |
-| Sandbox primitive | `srt` CLI | Maintained, runtime-agnostic, and gets seccomp socket blocking and PIN protections right. |
-| Integration | Spawn CLI, not import library | `srt` is a research preview; its library API may move. The CLI surface (`--settings`) is stable and tiny. |
+| Sandbox primitive | `srt` | Maintained, runtime-agnostic, and gets seccomp socket blocking and PIN protections right. |
+| Integration | Library, behind a `SandboxRunner` interface | One executable and no ambient global `srt`; no temp settings file; real violation attribution. Costs coupling to an unstable API — but the CLI would break on the same upstream changes. See README "Design notes". |
 | Language | TypeScript, Node ≥ 20 | Real JSON handling; zero-cost because `srt` is npm-installed anyway; cross-platform with one code path. |
 | Untrusted config | Monotonic merge + path containment | See below. |
 | MCP sockets | Out of MVP | All-or-nothing on Linux; a blunt grant is a product decision, not an MVP feature. |
@@ -64,10 +64,15 @@ a convenience wrapper into a security boundary. It deserves its own test file.
 The whole project rests on assumptions about `srt` on this machine that nobody has
 verified. Half a day here saves weeks later.
 
-- [ ] Confirm dependencies are present: `bwrap`, `socat`, `rg`, `node` ≥ 20, `opencode`,
-      and `srt` itself. **`socat` and `srt` are currently missing on this machine.**
-      Ask the user to install them; do not install anything yourself or via `sudo`.
-- [ ] Hand-write a settings JSON and run `srt --settings /abs/path opencode`.
+- [ ] **`socat` is missing and requires `sudo pacman -S socat`. Ask the user to
+      install it.** Do not install it yourself or work around it. `bwrap`, `rg`,
+      `node` ≥ 20 and `opencode` are already present here.
+- [ ] `npm install --save-exact @anthropic-ai/sandbox-runtime` in this repo. Local
+      only — no `-g`, so nothing global lands on `PATH`.
+- [ ] **Spike against the CLI first, deliberately.** `node_modules/.bin/srt
+      --settings /abs/path opencode` is the documented happy path and the fastest way
+      to confirm the host actually works. Production will use the library; this spike
+      is about validating the *environment*, not choosing the integration.
 - [ ] Confirm the agent can **reach its model API** through the proxy. This is the
       single most likely thing to fail and the least obvious to debug.
 - [ ] Confirm which four directories this `opencode` build actually uses
@@ -76,6 +81,13 @@ verified. Half a day here saves weeks later.
 - [ ] Confirm `denyRead: ["~"]` + `allowRead: [project]` actually produces a
       sandbox whose `ls ~` shows only the re-opened paths.
 - [ ] Confirm `**/.env` inside `protected.read` stays denied under `allowRead: ["."]`.
+- [ ] Then repeat the essential checks through `SandboxManager` to confirm the
+      library path produces an equivalent sandbox.
+- [ ] Check the installed package's actual config types. The README documents flat
+      `denyRead`/`allowWrite` arrays, but it also exports `FsReadRestrictionConfig` /
+      `FsWriteRestrictionConfig`, which hints at a richer schema. The merge layer's
+      output shape depends on which is current — trust the installed package over the
+      docs.
 - [ ] Note: an agent-driven session needs a real API key. Use a scratch project
       directory, not this repo.
 
@@ -119,18 +131,35 @@ correct, fully-resolved, provenance-annotated JSON. Fully unit-tested.
 
 ### M2 — Execution
 
-- [ ] Temp settings file in `$XDG_RUNTIME_DIR/ocs/` (fall back to `~/.cache/ocs/`),
-      mode `0600`, outside the project directory. Remove on exit, `SIGINT`,
-      `SIGTERM`, `SIGHUP`.
-- [ ] `chdir` to the project, then `exec` — or spawn and proxy signals, so we can
-      clean up. Decide: proxying is more code but survives `Ctrl-C` properly.
+The temp-file work that used to live here is gone: the policy goes to the runtime as
+an in-memory object, so there is nothing to write `0600` and nothing to clean up on
+a signal. What remains:
+
+- [ ] Define the `SandboxRunner` interface and its `LibraryRunner` implementation —
+      the seam that keeps the CLI/library decision reversible. Keep it small; the
+      merge layer, CLI and tests must not learn which one they are talking to.
+- [ ] `SandboxManager.initialize(policy)`, then `wrapWithSandbox()`, then
+      `await reset()` on the way out. **Test the reset path specifically** — skipped
+      cleanup leaks proxy processes, and that failure is easy to miss.
+- [ ] `chdir` to the project before initializing, so relative path expansion and the
+      mandatory-deny `ripgrep` scan happen against the right tree.
+- [ ] Spawn the wrapped command with `{ shell: true }` and `cwd` set to the project.
+      Handle pass-through args carefully: paths with spaces reach a shell string, so
+      quote defensively.
+- [ ] Signal handling. `Ctrl-C` must reach `opencode` and we must still reset.
+- [ ] Wire up violation attribution: key by invocation where possible and attach
+      sandbox denials to the tool call that caused them, via
+      `annotateStderrWithSandboxFailures`. Pass a `commandId` — the default key is
+      the command text, so long commands sharing a prefix would cross-attribute and
+      a rerun would inherit the earlier run's events.
 - [ ] Exit-code propagation. Note the known `zsh` bug in `srt` ≤ 0.0.77 where a
       failing command reports 0 — pin a newer version and add a regression test.
 - [ ] Fail-closed error surface: any config problem prints the reason, the
       offending entry, and the fix. Never fall back to a weaker policy. `srt`
       itself takes this stance deliberately and we should match it.
 - [ ] Actionable message when a required dependency is missing (`bwrap`, `socat`,
-      `rg`, `srt`).
+      `rg`). Note that a missing `srt` is now an npm resolution problem rather than
+      a `PATH` problem, which changes the wording of that message.
 
 ### M3 — Adversarial test suite
 
@@ -217,7 +246,7 @@ Ordered by value, not by effort.
 
 | Risk | Severity | Mitigation |
 | --- | --- | --- |
-| `srt` is an explicitly unstable research preview | High | Depend on the CLI surface, pin the version, treat upstream breakage as expected and cheap to absorb. |
+| `srt` is an explicitly unstable research preview | High | Pin the exact version, keep the integration behind `SandboxRunner` so breakage is a localized fix, and treat upstream breakage as expected and cheap to absorb. |
 | Hostile repo config bypasses the merge | Critical | Two independent gates; adversarial fixture suite; default-deny everywhere else. Ship no `--insecure`. |
 | `allowAllUnixSockets` gets turned on casually | Critical | Never enabled by the project config. Host-only, and the README states plainly that this is root-equivalent. |
 | Platform glob divergence gives false confidence | High | Validator rejects single-platform-only patterns instead of warning. |

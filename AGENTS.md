@@ -38,10 +38,14 @@ pass.
 4. **Fail closed, always.** Any error resolving, merging or validating a policy
    means `ocs` exits non-zero and runs nothing. There is deliberately no fallback
    to a weaker policy and no `--insecure` flag. Do not add one.
-5. **Do not shell out to `bwrap` directly.** Stay behind the `srt` CLI. It is an
-   unstable research preview, but its command surface is small and the blast
-   radius of coupling to its internals is much larger than the cost of the
-   indirection.
+5. **Do not shell out to `bwrap` directly, and do not call `srt` as a subprocess.**
+   Go through the `SandboxRunner` interface (`src/sandbox/runner.ts`). `srt` is an
+   unstable research preview; confining that instability to one small adapter is the
+   entire point. Nothing outside `src/sandbox/` should import
+   `@anthropic-ai/sandbox-runtime`.
+6. **`reset()` the sandbox runtime on every exit path.** It tears down the network
+   proxies; skipping it leaks processes. A leak here is easy to miss in tests and
+   annoying in real use.
 
 ## Do not "fix" the hostile fixtures
 
@@ -62,9 +66,12 @@ Each fixture should correspond to a case in the containment table in `PLAN.md`.
   do not shim it. Package installation is the user's call, not the agent's.
 - **Linux is the primary target.** macOS parity is in the plan but unproven. Do not
   assume macOS-specific behaviour has been verified here.
-- `srt` is pinned to a specific version. Do not bump it casually: versions ≤ 0.0.77
-  have a zsh bug where a failing command reports exit 0, and the whole point of
-  depending on it is that its behaviour is predictable.
+- `srt` is pinned to an exact version as a normal library dependency — not installed
+  globally, and not on `PATH`. Do not bump it casually: versions ≤ 0.0.77 have a zsh
+  bug where a failing command reports exit 0, and the whole point of depending on it
+  is that its behaviour is predictable.
+- `socat` is missing on this machine and needs `sudo pacman -S socat`. Report it; the
+  user installs it. Do not install, vendor or shim it.
 
 ## Commands
 

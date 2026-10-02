@@ -15,6 +15,11 @@ part that is tedious and easy to get wrong: deciding *what* should be allowed, f
 *this* project, safely, when one of the config inputs is a Git repository you just
 cloned.
 
+`srt` is consumed as a **library**, not as a subprocess. There is no `srt` binary on
+your `PATH` and no second thing to install: `ocs` is the only executable, and the
+sandbox version is pinned by `ocs`'s own lockfile. See
+[Design notes](#design-notes) for why, and for what that costs.
+
 The design goal is that running `ocs` on an unfamiliar repository is safe by
 default. See [Security model](#security-model).
 
@@ -69,8 +74,9 @@ The `PKGBUILD` pulls the real dependencies:
 | `ripgrep` | Used by `srt` to scan for sensitive files under writable paths. |
 | `nodejs` | Runs `ocs` and `srt`. |
 
-It also vendors `@anthropic-ai/sandbox-runtime` at a pinned version so `ocs` never
-depends on whatever happens to be in a global npm prefix.
+It also vendors `@anthropic-ai/sandbox-runtime` as a pinned library dependency, so
+`srt` is installed into `ocs`'s own tree and there is no global `srt` for anything
+else to pick up.
 
 There is deliberately no separate `sandbox-runtime` package to install. As of
 writing there is no AUR package and nothing in the official `extra`/`community`
@@ -81,10 +87,11 @@ is the intended path, and it means pacman owns the version pin.
 ### macOS
 
 ```sh
-npm install -g @anthropic-ai/sandbox-runtime   # provides `srt`
 npm install -g ocs
 brew install ripgrep
 ```
+
+No `socat` and no `srt` — the latter is a dependency of `ocs` itself.
 
 ### First run
 
@@ -195,8 +202,13 @@ table below.
 
 ### Mapping to `srt`
 
-`ocs` compiles the above into `srt`'s schema. Keeping this table in your head is
-enough to read a raw policy dump.
+`ocs` compiles the above into the `SandboxRuntimeConfig` object it passes to the
+runtime. Keeping this table in your head is enough to read `--print-config` output.
+
+Note that this is the shape shown in `srt`'s documentation; the package also exports
+`FsReadRestrictionConfig` and `FsWriteRestrictionConfig`, which hints at a richer
+schema for the filesystem half. The merge layer's output should be built against the
+types in the installed package rather than against the docs.
 
 | `ocs` | `srt` | Default |
 | --- | --- | --- |
@@ -332,14 +344,15 @@ still resolved to absolute and shown in `--explain`.
 `<project-path>/.ocs/config.json` is inside the writable project directory, so the
 agent can edit its own policy file.
 
-This is inert: `ocs` reads and compiles the policy once, at launch, writes the
-result to a temp file **outside** the project directory, and `srt` reads it once at
-wrap time. Nothing re-reads it during the session. Editing the file mid-session has
-no effect on the running sandbox — it takes effect the next time you run `ocs`, from
-your own shell, which is a decision you make deliberately.
+This is inert: `ocs` reads and compiles the policy once, at launch, and hands the
+result to the sandbox runtime as an in-memory object. Nothing re-reads the file
+during the session. Editing it mid-session has no effect on the running sandbox — it
+takes effect the next time you run `ocs`, from your own shell, which is a decision
+you make deliberately.
 
-The temp file holds a compiled policy, not a secret, but it is still written
-`0600` outside the project and removed on exit.
+Because the policy never reaches the filesystem, there is no temp file to write
+`0600`, no cleanup on signals, and no path an attacker could swap between compile
+and enforcement.
 
 ### What `srt` already does that we rely on
 
@@ -457,6 +470,45 @@ npm run test:int  # integration; needs bubblewrap + socat
 The test suite is mostly about the merge layer, because that is where the security
 decisions live. Integration tests that actually invoke `bwrap` are a smaller,
 separately-gated set.
+
+### Design notes: why the library, not the CLI
+
+`srt` ships both a CLI and a library. `ocs` uses the library, behind a narrow
+internal interface (`SandboxRunner`) that the rest of the codebase never sees.
+
+**What that buys us:**
+
+- **One executable.** No `srt` on `PATH` for something unrelated to invoke with
+  implicit defaults. For a tool whose entire job is not being invoked
+  accidentally, that matters more than it sounds.
+- **No temp file.** The CLI only accepts a settings *path*, which is what forced the
+  write-`0600`-to-a-runtime-dir-and-clean-up-on-signal design. The library takes the
+  config object directly, so that entire code path — and the window in which a
+  compiled policy sits on disk — does not exist.
+- **Real violation attribution.** The library exposes a keyed violation store and
+  `annotateStderrWithSandboxFailures()`, so a blocked operation can be reported back
+  with the actual reason. Through the CLI the only visibility is scraping stderr or
+  setting `SRT_DEBUG`.
+
+**What it costs:**
+
+- **Coupling to an explicitly unstable API.** `srt` calls itself a research preview
+  and says its APIs may evolve. We would be reading upstream source to adapt when a
+  `0.0.x` release breaks something. The mitigation is that this is not really a
+  choice between stable and unstable — if the config format or the `--settings`
+  handling changes, the CLI approach breaks too. The interface puts the risk in one
+  place.
+- **We still spawn a shell.** `wrapWithSandbox()` returns a command *string* that must
+  be run with `{ shell: true }`, because `srt` bakes the `bwrap` arguments into a
+  `/bin/sh -c` invocation either way. We just skip its argument parsing. The command
+  is only ever `opencode` plus pass-through args, so this is manageable — but it is
+  not the shell-free design it can appear to be.
+
+The `SandboxRunner` interface exists so this stays reversible. `LibraryRunner` and a
+`CliRunner` are both implementable behind it, and the spike in M0 deliberately
+validates against the CLI first because that is the documented happy path — it is the
+quickest way to confirm `socat`, the network proxy and the mount policy actually work
+on the host, before any of it is wired to the library.
 
 ## License
 
