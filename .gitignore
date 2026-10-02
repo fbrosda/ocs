@@ -1,0 +1,37 @@
+# Build output
+dist/
+node_modules/
+coverage/
+*.tsbuildinfo
+*.tsbuildinfo.*
+
+# Environment / secrets — never commit. Note that the sandbox protects these
+# at runtime too, but a committed secret is a committed secret.
+.env
+.env.*
+*.pem
+*.key
+!.gitkeep
+
+# makepkg artifacts (PKGBUILD output — see README "Install")
+pkg/
+src/
+*.pkg.tar.*
+.srcdist
+
+# Logs and editor noise
+*.log
+npm-debug.log*
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# OpenCode's project-local working state (agents/, commands/, plugins/, scratch).
+.opencode/*
+
+# ocs's own project directory. config.json is deliberately NOT ignored: the
+# sandbox policy belongs in the repo so a team reviews policy changes in a PR
+# like any other config change. Anything else that accumulates here is local.
+.ocs/*
+!.ocs/config.json

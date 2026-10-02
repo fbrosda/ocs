@@ -15,7 +15,7 @@ ocs <project-path>
   │
   ├─ resolve project path → absolute, realpath'd, must exist
   ├─ load host config      ~/.config/ocs/config.json        (trusted)
-  ├─ load project config   <path>/.opencode/ocs.json        (UNTRUSTED)
+  ├─ load project config   <path>/.ocs/config.json          (UNTRUSTED)
   ├─ merge with per-key permissions + path containment     (fail closed)
   ├─ validate the compiled policy                          (fail closed)
   ├─ write to $XDG_RUNTIME_DIR/ocs/<pid>.json, mode 0600, outside the project
@@ -64,8 +64,9 @@ a convenience wrapper into a security boundary. It deserves its own test file.
 The whole project rests on assumptions about `srt` on this machine that nobody has
 verified. Half a day here saves weeks later.
 
-- [ ] Install `@anthropic-ai/sandbox-runtime`; add `socat` (`pacman -S socat`) — it
-      is missing here and is a hard Linux dependency.
+- [ ] Confirm dependencies are present: `bwrap`, `socat`, `rg`, `node` ≥ 20, `opencode`,
+      and `srt` itself. **`socat` and `srt` are currently missing on this machine.**
+      Ask the user to install them; do not install anything yourself or via `sudo`.
 - [ ] Hand-write a settings JSON and run `srt --settings /abs/path opencode`.
 - [ ] Confirm the agent can **reach its model API** through the proxy. This is the
       single most likely thing to fail and the least obvious to debug.
@@ -164,7 +165,7 @@ Written alongside M1–M2, not after. Each fixture is a hostile repo config.
 
 - [ ] README accuracy pass against the built thing.
 - [ ] Ship `ocs.schema.json`, publish it, wire up `$schema` autocompletion.
-- [ ] Decide whether `ocs init` should also scaffold a `.opencode/ocs.json` example
+- [ ] Decide whether `ocs init` should also scaffold a `.ocs/config.json` example
       in a project (`ocs init --project`).
 - [ ] Sandbox-violation surfacing. On macOS `srt` has a real violation log; Linux
       has none. Consider a short "here is how to debug with `SRT_DEBUG`" section.

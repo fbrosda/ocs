@@ -72,6 +72,12 @@ The `PKGBUILD` pulls the real dependencies:
 It also vendors `@anthropic-ai/sandbox-runtime` at a pinned version so `ocs` never
 depends on whatever happens to be in a global npm prefix.
 
+There is deliberately no separate `sandbox-runtime` package to install. As of
+writing there is no AUR package and nothing in the official `extra`/`community`
+repositories — the only `srt` packages in the AUR are the unrelated Secure Reliable
+Transport video codec and the SubRip subtitle format. Vendoring via this `PKGBUILD`
+is the intended path, and it means pacman owns the version pin.
+
 ### macOS
 
 ```sh
@@ -137,8 +143,14 @@ Two files, merged into one policy.
 
 **Host** — `~/.config/ocs/config.json`. Yours. Fully trusted.
 
-**Project** — `<project-path>/.opencode/ocs.json`. Lives in the repository. Treat
+**Project** — `<project-path>/.ocs/config.json`. Lives in the repository. Treat
 as hostile input.
+
+`.ocs/` is deliberately not `.opencode/`. That directory belongs to OpenCode, which
+reads it for `agents/`, `commands/`, `plugins/`, `skills/`, `tools/` and `themes/`,
+and resolves project config from `opencode.json` at the repository root. Writing
+into a directory another tool owns means depending on its loader's behaviour for
+every subdirectory name it might one day decide to interpret.
 
 ### Schema
 
@@ -317,7 +329,7 @@ still resolved to absolute and shown in `--explain`.
 
 ### Config tampering
 
-`<project-path>/.opencode/ocs.json` is inside the writable project directory, so the
+`<project-path>/.ocs/config.json` is inside the writable project directory, so the
 agent can edit its own policy file.
 
 This is inert: `ocs` reads and compiles the policy once, at launch, writes the
