@@ -4,8 +4,41 @@ Companion to [README.md](README.md), which is the specification. This document
 covers sequencing, the unknowns worth burning down early, and the decisions that
 are already made so they don't get relitigated.
 
-Status: pre-alpha. Core implementation done. Unit tests passing (92/92), integration
-tests passing (6/6, needs `bwrap`). Build, type check, lint and format all clean.
+Status: pre-alpha. Core implementation done. Unit tests passing (108/108),
+integration tests passing (6/6, needs `bwrap`). Build, type check, lint and format
+all clean. Installable from this tree on Arch (`makepkg -si`) and via npm
+(`npm install -g ocs`); `ocs doctor` verifies a machine.
+
+### Three bugs found while making it installable
+
+None of these were found by a test; two of them were found by looking for a
+different problem. Recorded because the pattern is the lesson.
+
+**A security assertion whose subject came from the environment.** The adversarial
+suite built its project fixture in `os.tmpdir()`, then asserted that
+`mounts.read: ["../../etc"]` is rejected. From the default `TMPDIR` that string
+resolves to `/etc` and the test passes. From any deeper `TMPDIR` it resolves to
+`/tmp/etc` — which the gate *accepts*, correctly, because `/tmp` is a global grant —
+and the test fails. So the case that looked like a regression was an environment
+artifact, and on the author's machine the assertion was green while testing
+something other than what it claimed. Third instance of this shape in the repo,
+after the glob-anchoring bug; the rule is now written into the README and the
+suite asserts its own premise.
+
+**Nothing resolved `opencode`.** The policy denies `$HOME` and re-opens four
+directories inside it — opencode's *config and state*. None of them is the
+directory opencode's *executable* lives in. A system-wide `/usr/bin/opencode` is
+covered by the `/usr` grant and nobody notices; an nvm install, a curl install, or
+a user-local npm prefix is not, and produces a bare `127` that reads as a typo. No
+test could have caught this, because it is a property of where the user installed
+opencode. `ocs doctor` and the pre-flight in the run path now check it, and the
+check deliberately does not grant the path.
+
+**The README documented an install that did not exist.** It told Arch users to run
+`makepkg -si` against a `PKGBUILD` that was not in the repository. The npm path
+also could not be confirmed from a clean machine, so `ocs doctor` resolving the
+pinned runtime version is now the check that tells you whether an install is
+complete.
 
 ### Defaults, and how they got smaller
 
@@ -74,6 +107,31 @@ interface so the choice stays reversible. The policy object never touches disk.
 | Untrusted config | Monotonic merge + path containment | See below. |
 | MCP sockets | Out of MVP | All-or-nothing on Linux; a blunt grant is a product decision, not an MVP feature. |
 | MVP scope | Linux only | macOS parity in M4. |
+| A project naming a global grant | Accepted | It grants nothing new, so there is no widening to refuse; the gate asks "can this repo ask for something it did not have". See "The global-grant allowance" below. |
+| `ocs doctor` grants nothing | Report, never fix | Auto-granting wherever `opencode` lives would make one command's location part of every later policy. |
+
+### The global-grant allowance
+
+The containment gate accepts a project path that lands inside the project *or*
+inside a directory every project already has: opencode's four XDG state
+directories, `~/.config/ocs`, `/tmp`, `/var/tmp`. That second clause was
+implemented from the start but never written down, and the adversarial suite
+disagreed with the README about it — which is how the `TMPDIR` bug above surfaced.
+
+It stays, with the reasoning now explicit and tested:
+
+- It cannot widen. Every accepted path is already granted, so the project entry is
+  a no-op. That is the property the tests assert — not just that the path is
+  accepted, but that the host policy already granted it.
+- Rejecting it would break legitimate configs that name `/tmp` explicitly, in
+  exchange for no security.
+- The system directories are deliberately *excluded* even though they are read
+  defaults: the sandbox needs a userland to exist, but "needed to boot" is not
+  "granted on request". A project naming `/etc` is a containment failure.
+
+The consequence, now documented in the README rather than left implicit: a project
+config can reach `~/.config/opencode` on write. That is open question 3 below, and
+it arrives through this clause rather than through a decision to allow it.
 
 ### The reasoning behind the trust model, briefly
 
@@ -237,9 +295,12 @@ a signal. What remains:
 - [x] Fail-closed error surface: any config problem prints the reason, the
       offending entry, and the fix. Never fall back to a weaker policy. `srt`
       itself takes this stance deliberately and we should match it.
-- [ ] Actionable message when a required dependency is missing (`bwrap`, `socat`,
+- [x] Actionable message when a required dependency is missing (`bwrap`, `socat`,
       `rg`). Note that a missing `srt` is now an npm resolution problem rather than
       a `PATH` problem, which changes the wording of that message.
+      (`ocs doctor` reports each one with its consequence and what to install, and
+      exits non-zero. The dependency it turned out to need most was `opencode`
+      itself — see "Three bugs found while making it installable".)
 
 ### M3 — Adversarial test suite
 
@@ -262,9 +323,14 @@ Written alongside M1–M2, not after. Each fixture is a hostile repo config.
 
 ### M4 — Packaging and macOS
 
-- [ ] `PKGBUILD`: pinned `@anthropic-ai/sandbox-runtime`, deps
+- [x] `PKGBUILD`: pinned `@anthropic-ai/sandbox-runtime`, deps
       `bubblewrap socat ripgrep nodejs`, `arch=('x86_64' 'aarch64')` — `srt` ships
       prebuilt `apply-seccomp` for those two only.
+      (Written. Builds from the tree via `npm ci`, so the version pin stays in
+      `package-lock.json` and there is no second copy to forget. `check()` runs the
+      unit suite only; the integration suite needs a working sandbox, which is
+      exactly what the build machine may not have. Still needs a real `makepkg -si`
+      on a clean Arch machine — see the open item below.)
 - [x] Verify the seccomp binary actually loads on this kernel. If it silently falls
       back, say so loudly at runtime rather than pretending Unix sockets are blocked.
       (Two findings. **It was never bound**: srt emits `apply-seccomp` into the bwrap
@@ -276,15 +342,19 @@ Written alongside M1–M2, not after. Each fixture is a hostile repo config.
       `test/sandbox/seccomp.int.test.ts`. `ocs` now fails closed if the helper is
       missing while the policy claims sockets are blocked.)
 - [ ] macOS: install path, platform capability detection, no `socat` dependency.
-- [ ] **Verify opencode's directory layout on macOS** — the four XDG paths are the
+      (The npm install path and `ocs doctor`'s platform reporting exist; neither
+      has been run on a Mac. The README now says so rather than implying parity.)- [ ] **Verify opencode's directory layout on macOS** — the four XDG paths are the
       Linux assumption and may differ under `~/Library/Application Support`. Do not
       port the Linux paths and call it done.
 - [ ] macOS-only: document `allowLocalBinding` and the Apple Events trade-off.
 
 ### M5 — Docs and hardening
 
-- [ ] README accuracy pass against the built thing.
+- [ ] README accuracy pass against the built thing. (Install, `ocs doctor` and the
+      containment rule done; the rest still needs reading end to end.)
 - [ ] Ship `ocs.schema.json`, publish it, wire up `$schema` autocompletion.
+      (It is in the npm tarball and installed to `/usr/share/doc` by the PKGBUILD;
+      `$schema` is still not written into generated configs.)
 - [ ] Decide whether `ocs init` should also scaffold a `.ocs/config.json` example
       in a project (`ocs init --project`).
 - [ ] Sandbox-violation surfacing. On macOS `srt` has a real violation log; Linux
@@ -318,18 +388,33 @@ Ordered by value, not by effort.
    sandbox escape rather than a grant. But `nix` and `cargo` can pull from
    non-obvious endpoints, and someone with a hermetic setup may legitimately want
    it. Possibly it should be host-only rather than rejected outright.
-3. **Should `ocs` manage opencode's own config?** `~/.config/opencode` is inside the
-   sandbox's read+write grants because opencode needs it. That means the agent can
-   rewrite its own model and MCP configuration. Probably fine — it is already inside
-   the trust boundary of the session — but worth a deliberate decision rather than
-   an accident.
+3. **Should `ocs` manage opencode's own config?** *Partly answered.* `~/.config/opencode`
+   is inside the sandbox's read+write grants because opencode needs it, so the agent
+   can rewrite its own model and MCP configuration. It is also reachable from a
+   *project* config through the global-grant allowance (see above), which is the part
+   that deserved a decision rather than an accident. Current answer: allowed, because
+   the path is already inside the trust boundary of every session and denying it would
+   break opencode. Pinned by a test so changing it is a deliberate act. Still open:
+   whether `ocs` should go further and make that directory read-only, at the cost of
+   opencode being unable to write session state.
 4. **How much do we care about Windows?** `srt` has alpha Windows support with a
    different security model entirely. Out of scope for now; worth stating so nobody
    assumes parity.
 5. **Package-manager caches as a first-class concept.** Right now `~/.npm/_cacache`
    is something users discover by hitting the error. A `mounts.packageCaches: true`
    convenience toggle covering npm/pnpm/yarn/cargo/go/pip/uv would be nicer than
-   six individual paths.
+   six individual paths. `ocs doctor` is the natural place to offer it: it already
+   knows which of those directories exist.
+6. **Is `@anthropic-ai/sandbox-runtime` installable by a third party?** Everything
+   about the npm path depends on it being fetchable from the public registry, and it
+   could not be verified from the machine this was built on. Until it is confirmed on
+   a clean machine, treat Arch as the supported install and npm as unverified — the
+   PKGBUILD has the same requirement and `ocs doctor` reports it either way. If it is
+   *not* publicly available, the npm install section has to come out and the project
+   needs a different distribution story for non-Arch users.
+7. **Who owns the `ocs` npm name, and the repo URL?** Neither is settled: there is no
+   git remote, so `repository`/`homepage` are absent from `package.json` and the
+   PKGBUILD carries no `url`. Both are one edit each once there is a remote.
 
 ---
 

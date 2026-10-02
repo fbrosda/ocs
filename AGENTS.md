@@ -47,16 +47,43 @@ pass.
    proxies; skipping it leaks processes. A leak here is easy to miss in tests and
    annoying in real use.
 
-## Do not "fix" the hostile fixtures
+## Do not "fix" the hostile configs
 
-`test/fixtures/hostile/` will contain configs that attempt sandbox escapes —
+`test/config/adversarial.test.ts` contains configs that attempt sandbox escapes —
 `mounts.write: ["/"]`, `srt.allowAppleEvents: true`, symlinks pointing at `~/.aws`.
 
 They are **intentionally malicious**. They are test inputs, not vulnerabilities.
 Deleting them, "correcting" them, or adding `srt: { allowAllUnixSockets: false }`
 to make one of them pass breaks the test suite's entire reason to exist.
 
-Each fixture should correspond to a case in the containment table in `PLAN.md`.
+Each should correspond to a case in the containment table in `PLAN.md`. They live
+inline in the test rather than in `test/fixtures/hostile/` (which is empty) because
+each one is a single object literal next to the assertion that rejects it — the
+attack and the defence in the same screen. `test/fixtures/` is reserved for the
+golden-file fixtures of M3.
+
+## A security assertion must not depend on the ambient environment
+
+Three bugs in this repository were assertions that passed on the author's machine
+and tested something else on anyone else's:
+
+- read-deny globs expanded against the working directory rather than the project
+- an adversarial fixture built in `os.tmpdir()`, so `../../etc` resolved to `/etc`
+  at the default `TMPDIR` and to an already-granted `/tmp/etc` anywhere deeper
+- `main` in `package.json` pointing at a file that did not exist
+
+The rule: a test may not *depend* on an ambient value without asserting the
+consequence. Deriving a fixture from `os.homedir()` or `os.tmpdir()` is fine — that
+is how you get a real filesystem to work with — but if the case only means anything
+because of where it landed, assert that too.
+
+So: if a case needs to be *outside* every grant, put it somewhere outside every
+grant **and assert that premise**, so a later move — or an unusual `HOME` — fails
+loudly instead of silently inverting the case. If it needs a path at a particular
+depth, construct it at that depth rather than hoping the temp dir happens to be
+one.
+
+The adversarial suite has such an assertion. Keep it.
 
 ## Environment constraints
 
@@ -76,16 +103,20 @@ Each fixture should correspond to a case in the containment table in `PLAN.md`.
 
 ## Commands
 
-Not yet wired up — the repository is spec-only as of the initial commit.
-
 ```sh
-npm test          # unit, golden and adversarial suites; no sandbox required
-npm run test:int  # integration; needs bubblewrap + socat
-npm run build     # compile to dist/
+npm test              # unit, preflight and adversarial suites; no sandbox required
+npm run test:int      # integration; needs bubblewrap + socat
+npm run build         # compile to dist/ and mark dist/cli.js executable
+npm run lint
+npm run format:check
 ```
 
 The unit suite is the bulk of the value and needs no privileges, no `bwrap`, and no
-network. Integration tests that actually invoke the sandbox are gated separately.
+network. Integration tests that actually invoke the sandbox are gated separately,
+and they cannot run inside a sandbox like this one — `srt` binds an `AF_UNIX`
+control socket during `initialize()` and gets `EPERM`. A failure of the form
+`listen EPERM ... srt-mux-*.sock` means the harness is sandboxed, not that the
+code is broken.
 
 ## Conventions
 

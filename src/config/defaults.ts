@@ -1,8 +1,7 @@
 import { OcsConfig } from "./types.js";
 import {
-  getOcsRuntimeDir,
+  getDefaultReadDirs,
   getOpencodeBaseDirs,
-  getSystemReadDirs,
   getTempDirs,
 } from "./paths.js";
 
@@ -71,11 +70,7 @@ export function getDefaultHostConfig(): OcsConfig {
       deny: [],
     },
     mounts: {
-      read: [
-        ...getOpencodeBaseDirs(),
-        getOcsRuntimeDir(),
-        ...getSystemReadDirs(),
-      ],
+      read: getDefaultReadDirs(),
       // The agent can see how it was configured but not edit it: nothing in the
       // policy ever needs rewriting mid-session. See README, "Config tampering".
       write: [...getOpencodeBaseDirs(), ...getTempDirs()],

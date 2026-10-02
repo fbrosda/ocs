@@ -1,6 +1,14 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mergeConfigs, ConfigError } from "../../src/config/merge.js";
 import { getDefaultHostConfig } from "../../src/config/defaults.js";
+import {
+  getGlobalGrantDirs,
+  getDefaultReadDirs,
+  getOpencodeBaseDirs,
+  getOcsRuntimeDir,
+  isAtOrUnder,
+  normalizePath,
+} from "../../src/config/paths.js";
 import * as fs from "fs";
 import * as path from "path";
 import * as os from "os";
@@ -18,12 +26,48 @@ describe("adversarial cases", () => {
   let outside: string;
 
   beforeEach(() => {
-    project = fs.mkdtempSync(path.join(os.tmpdir(), "ocs-adv-proj-"));
-    // Deliberately *not* under os.tmpdir(): /tmp and /var/tmp are global grants
-    // every project already has, so a symlink pointing there is legitimately
-    // allowed and would prove nothing. This has to be somewhere a project
-    // cannot reach — a directory in the home tree is the real hostile case.
+    // Both fixtures live in the home tree, and neither may live under
+    // os.tmpdir(). That is not tidiness — it is what makes the `..` cases below
+    // mean anything.
+    //
+    // /tmp and /var/tmp are global grants every project already has, so a path
+    // that climbs out of a project *under /tmp* lands back inside a grant and is
+    // legitimately accepted. The containment tests were written against a
+    // fixture in os.tmpdir(), which made `../../etc` resolve to `/etc` on a
+    // machine with the default TMPDIR and to `/tmp/etc` — accepted — on any
+    // machine where TMPDIR pointed one level deeper. A security assertion whose
+    // subject is derived from ambient environment is a test that silently stops
+    // testing; this suite now pins its own premise instead (see below).
+    project = fs.mkdtempSync(path.join(os.homedir(), ".ocs-adv-proj-"));
     outside = fs.mkdtempSync(path.join(os.homedir(), ".ocs-adv-outside-"));
+  });
+
+  /**
+   * The premise every `..` case in this file rests on.
+   *
+   * If the fixture ever moves somewhere whose ancestors are granted — under
+   * /tmp, say — then climbing out lands in a grant, the gate accepts it by
+   * design, and the assertions below start failing for reasons that have
+   * nothing to do with the gate. Better to fail here, with a sentence that says
+   * what happened, than to fail six cases later with `../../etc` in the message.
+   *
+   * This is not hypothetical: it is what a `HOME` set to a directory under /tmp
+   * produces, and the containment cases below all fail together when it does.
+   * That is the intended outcome — there is no ungranted directory under such a
+   * `HOME`, so the cases cannot mean anything, and saying so is better than
+   * passing them for the wrong reason.
+   */
+  it("places its fixtures outside every global grant (fails if HOME is inside /tmp)", () => {
+    const projectDir = path.dirname(project);
+    expect(getGlobalGrantDirs().map(normalizePath)).not.toContain(
+      normalizePath(projectDir)
+    );
+    // One level up must also be ungranted, or `..` proves nothing.
+    expect(
+      getGlobalGrantDirs().some((g) =>
+        isAtOrUnder(normalizePath(projectDir), normalizePath(g))
+      )
+    ).toBe(false);
   });
 
   afterEach(() => {
@@ -59,10 +103,110 @@ describe("adversarial cases", () => {
       );
     });
 
-    it("rejects climbing out with ../", async () => {
+    it("rejects climbing out with ..", async () => {
+      // A sibling of the project. Deterministic now that the fixture is in the
+      // home tree: the parent of the fixture is not itself a grant.
+      await expect(merge({ mounts: { read: [".."] } })).rejects.toThrow(
+        ConfigError
+      );
+    });
+
+    it("rejects climbing out with ../../etc", async () => {
+      // The PLAN.md containment table's `project/../../etc` row. Two levels up
+      // from a home-tree fixture is the home directory's parent, which nothing
+      // grants — under the old /tmp fixture this same string resolved to
+      // `/tmp/etc` on any machine with a deeper TMPDIR and was accepted.
       await expect(merge({ mounts: { read: ["../../etc"] } })).rejects.toThrow(
         ConfigError
       );
+    });
+
+    it("rejects a read of a system directory the way it already rejects a write", async () => {
+      await expect(merge({ mounts: { read: ["/etc"] } })).rejects.toThrow(
+        ConfigError
+      );
+    });
+
+    it("accepts a project path inside a global grant, because it is already granted", async () => {
+      // The documented rule, asserted rather than left implicit: a project may
+      // name a path inside a grant every project already has, and
+      // `~/.config/opencode` is one of those (paths.ts, getGlobalGrantDirs).
+      //
+      // Acceptance is sound *only* because the host policy already grants it,
+      // so that is the half worth asserting: if this ever fails because the host
+      // default was narrowed, the project entry stopped being a no-op and the
+      // gate's reasoning no longer holds.
+      const opencodeConfigDir = getOpencodeBaseDirs()[0]!;
+      const spelling = path.relative(project, opencodeConfigDir);
+
+      const { config } = await mergeConfigs(
+        getDefaultHostConfig(),
+        { mounts: { read: [spelling] } },
+        project
+      );
+
+      expect(config.mounts.read).toContain(opencodeConfigDir);
+      expect(getDefaultHostConfig().mounts.read).toContain(opencodeConfigDir);
+    });
+
+    it("accepts a write on opencode's own config, which the host already grants", async () => {
+      // PLAN.md open question 3. The agent can rewrite its own model and MCP
+      // config, and a project config can reach that path through the same
+      // global-grant allowance above — not because anyone decided a repository
+      // should be able to do that, but because the path is already inside the
+      // trust boundary of every session. Pinning it here makes the answer
+      // deliberate and gives whoever decides otherwise a test to change.
+      const opencodeConfigDir = getOpencodeBaseDirs()[0]!;
+      const spelling = path.relative(project, opencodeConfigDir);
+
+      const { config } = await mergeConfigs(
+        getDefaultHostConfig(),
+        { mounts: { write: [spelling] } },
+        project
+      );
+
+      expect(config.mounts.write).toContain(opencodeConfigDir);
+      expect(getDefaultHostConfig().mounts.write).toContain(opencodeConfigDir);
+    });
+
+    it("rejects a path one character away from a grant", async () => {
+      // The prefix trap, in the direction that matters: `/home/fb/.config/ocs`
+      // is granted, `/home/fb/.config/ocs-backup` is not, and a `startsWith`
+      // without a separator would say otherwise.
+      const sibling = `${getOcsRuntimeDir()}-not-granted`;
+      fs.mkdirSync(sibling, { recursive: true });
+      try {
+        await expect(merge({ mounts: { read: [sibling] } })).rejects.toThrow(
+          ConfigError
+        );
+      } finally {
+        fs.rmSync(sibling, { recursive: true, force: true });
+      }
+    });
+
+    it("treats opencode's own directories as grants and system directories as not", () => {
+      // Two lists describe "what a project may name", and the difference between
+      // them is deliberate rather than an oversight:
+      //
+      // - opencode's state directories and ~/.config/ocs are read *and* write
+      //   defaults, so a project naming one adds nothing and is allowed to.
+      // - the system directories are read defaults because the sandbox needs a
+      //   userland to exist at all, but a project naming one is a containment
+      //   failure. Nothing in a repository's business, and "needed to boot" is
+      //   not the same claim as "granted on request" — keeping that distinction
+      //   sharp is the point.
+      const reads = getDefaultReadDirs().map(normalizePath);
+      const grants = getGlobalGrantDirs().map(normalizePath);
+
+      for (const dir of [...getOpencodeBaseDirs(), getOcsRuntimeDir()]) {
+        const normalized = normalizePath(dir);
+        expect(reads).toContain(normalized);
+        expect(grants).toContain(normalized);
+      }
+      for (const dir of ["/usr", "/etc"]) {
+        expect(reads).toContain(normalizePath(dir));
+        expect(grants).not.toContain(normalizePath(dir));
+      }
     });
 
     it("rejects a symlink planted in the repo pointing out of it", async () => {

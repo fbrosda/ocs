@@ -102,6 +102,32 @@ export function getSystemReadDirs(): string[] {
 }
 
 /**
+ * The directories every policy is readable in before any config is applied.
+ *
+ * Derived once here so the defaults, the containment gate and the pre-flight
+ * reachability check cannot drift apart — they were previously written out
+ * separately and had already begun to disagree about what "granted" means.
+ */
+export function getDefaultReadDirs(): string[] {
+  return [...getOpencodeBaseDirs(), getOcsRuntimeDir(), ...getSystemReadDirs()];
+}
+
+/**
+ * Whether `candidate` is `root` or lives underneath it.
+ *
+ * The `+ path.sep` suffix is the whole point: a plain `startsWith(root)` treats
+ * `/home/fb-backup` as inside `/home/fb`, which is the same class of
+ * prefix-confusion bug that makes naive path allowlists wrong.
+ *
+ * Both arguments must already be absolute and resolved — `..`, symlinks and
+ * trailing slashes all change the answer, and this function deliberately does
+ * none of that work. Callers resolve first, compare second.
+ */
+export function isAtOrUnder(candidate: string, root: string): boolean {
+  return candidate === root || candidate.startsWith(root + path.sep);
+}
+
+/**
  * The roots a relative read-deny glob is anchored to.
  *
  * The project only, and that is a measured decision rather than a cautious one.

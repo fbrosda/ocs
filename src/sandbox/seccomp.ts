@@ -43,6 +43,63 @@ export type SeccompBinary = {
 };
 
 /**
+ * Where `@anthropic-ai/sandbox-runtime` actually lives on this machine.
+ *
+ * Resolved from this module rather than a hardcoded relative path, so the
+ * result is correct whether ocs runs from `src/` under tsx, from `dist/`, or
+ * from a global install. Kept as the single resolver on purpose: `srt` does not
+ * export its own, and letting two resolvers disagree is how you end up binding
+ * one file and executing another.
+ *
+ * Lives inside `src/sandbox/` so AGENTS.md invariant 5 still holds — nothing
+ * outside this directory reaches into the runtime package.
+ */
+function resolvePackageRoot(): { root: string } | { error: string } {
+  try {
+    const require = createRequire(import.meta.url);
+    return {
+      root: path.dirname(
+        require.resolve("@anthropic-ai/sandbox-runtime/package.json")
+      ),
+    };
+  } catch (e: unknown) {
+    return {
+      error: `could not locate @anthropic-ai/sandbox-runtime: ${errorText(e)}`,
+    };
+  }
+}
+
+function errorText(e: unknown): string {
+  return e instanceof Error ? e.message : String(e);
+}
+
+/**
+ * The pinned runtime version, for `ocs doctor`.
+ *
+ * Read from the installed package rather than from `ocs`'s own `package.json`,
+ * so the number reported is the one that will actually be enforced — a doctor
+ * that prints the declared version while a different one is loaded is worse
+ * than no doctor.
+ */
+export function resolveSrtVersion(): { version: string } | { error: string } {
+  const resolved = resolvePackageRoot();
+  if ("error" in resolved) {
+    return { error: resolved.error };
+  }
+  try {
+    const pkg = JSON.parse(
+      fs.readFileSync(path.join(resolved.root, "package.json"), "utf-8")
+    ) as { version?: unknown };
+    if (typeof pkg.version !== "string") {
+      return { error: "the installed package.json has no version field" };
+    }
+    return { version: pkg.version };
+  } catch (e: unknown) {
+    return { error: `could not read the installed version: ${errorText(e)}` };
+  }
+}
+
+/**
  * Locate the `apply-seccomp` binary srt will use.
  *
  * Resolved here rather than taken from srt so `ocs` can bind exactly the path
@@ -60,24 +117,13 @@ export function resolveSeccompBinary(): SeccompBinary {
     };
   }
 
-  let packageRoot: string;
-  try {
-    // Resolved from this module rather than a hardcoded relative path, so the
-    // result is correct whether ocs runs from `src/` under tsx, from `dist/`, or
-    // from a global install.
-    const require = createRequire(import.meta.url);
-    packageRoot = path.dirname(
-      require.resolve("@anthropic-ai/sandbox-runtime/package.json")
-    );
-  } catch (e: unknown) {
-    return {
-      path: null,
-      reason: `could not locate @anthropic-ai/sandbox-runtime: ${e instanceof Error ? e.message : String(e)}`,
-    };
+  const resolvedRoot = resolvePackageRoot();
+  if ("error" in resolvedRoot) {
+    return { path: null, reason: resolvedRoot.error };
   }
 
   const binary = path.join(
-    packageRoot,
+    resolvedRoot.root,
     "vendor",
     "seccomp",
     arch,

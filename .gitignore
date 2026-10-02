@@ -18,6 +18,9 @@ pkg/
 *.pkg.tar.*
 .srcdist
 
+# npm pack output, if run in the tree rather than with --pack-destination
+*.tgz
+
 # Logs and editor noise
 *.log
 npm-debug.log*

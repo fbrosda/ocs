@@ -31,9 +31,10 @@ default. See [Security model](#security-model).
 outgrown parts of it and the gaps are tracked in [PLAN.md](PLAN.md).
 
 Implemented and tested: the config model, the merge layer with both security
-gates, policy compilation, the `SandboxRunner` seam over `srt`, and the CLI.
-Linux is the working target. macOS is unverified. Known gaps are listed under
-[Development](#development).
+gates, policy compilation, the `SandboxRunner` seam over `srt`, the CLI, and
+`ocs doctor`. Linux is the working target; `makepkg -si` and `npm install -g ocs`
+both install from this tree. macOS is implemented but **unverified** — see
+[Install](#install). Known gaps are listed under [Development](#development).
 
 The defaults are deliberately small — one provider domain, five credential
 globs, one anchor — because they were measured down from larger first drafts.
@@ -85,15 +86,32 @@ The `PKGBUILD` pulls the real dependencies:
 | `ripgrep` | Used by `srt` to scan for sensitive files under writable paths. |
 | `nodejs` | Runs `ocs` and `srt`. |
 
-It also vendors `@anthropic-ai/sandbox-runtime` as a pinned library dependency, so
-`srt` is installed into `ocs`'s own tree and there is no global `srt` for anything
-else to pick up.
+It vendors `@anthropic-ai/sandbox-runtime` as a pinned library dependency, so `srt`
+is installed into `ocs`'s own tree and there is no global `srt` for anything else to
+pick up. The pin lives in `package-lock.json` and is enforced by `npm ci`, which the
+`PKGBUILD` uses rather than `npm install` — so there is exactly one place the
+version is written down.
 
 There is deliberately no separate `sandbox-runtime` package to install. As of
 writing there is no AUR package and nothing in the official `extra`/`community`
 repositories — the only `srt` packages in the AUR are the unrelated Secure Reliable
 Transport video codec and the SubRip subtitle format. Vendoring via this `PKGBUILD`
 is the intended path, and it means pacman owns the version pin.
+
+### npm
+
+```sh
+npm install -g ocs
+```
+
+`ocs` declares `os: ["linux", "darwin"]`, so npm refuses the install outright on
+anything else rather than installing a binary that cannot work.
+
+This path depends on `@anthropic-ai/sandbox-runtime` being fetchable from the public
+registry, since it is a normal runtime dependency and there is no global `srt` to
+fall back to. **`ocs doctor` is the check**: it resolves the installed runtime and
+reports its version, or tells you the install is incomplete. Run it before filing
+anything else.
 
 ### macOS
 
@@ -102,7 +120,14 @@ npm install -g ocs
 brew install ripgrep
 ```
 
-No `socat` and no `srt` — the latter is a dependency of `ocs` itself.
+No `socat` — macOS uses Seatbelt, which filters sockets by path and has no proxy
+bridge to run.
+
+**This path is implemented but unverified.** It has not been exercised on a Mac,
+and the opencode state directories in the defaults are the Linux XDG layout, which
+may differ under `~/Library/Application Support`. Expect to need extra `-m` grants
+on first run; `ocs doctor` reports the platform as a warning rather than pretending
+otherwise. Linux is the supported target.
 
 ### First run
 
@@ -157,6 +182,63 @@ visible as such.
 
 The same paths in a project config are rejected. That asymmetry is the point —
 see [Security model](#security-model).
+
+Two subcommands:
+
+| Command | Effect |
+| --- | --- |
+| `ocs init` | Write a starting host config to `~/.config/ocs/config.json`. |
+| `ocs doctor [project]` | Check that this machine can actually run the sandbox. |
+
+### Verifying your install
+
+```sh
+ocs doctor
+```
+
+Run this first on any new machine, and first after any `npm install -g ocs`
+upgrade. It is read-only — it starts no sandbox, resolves no policy, and changes
+nothing — so it is safe to run while you are still setting things up.
+
+It reports, and explains the consequence of each:
+
+| Check | What a failure means |
+| --- | --- |
+| `bwrap`, `socat`, `rg` | Missing tools. `socat` in particular is close to silent: without it the sandbox comes up with **no network at all**, which looks exactly like a correct empty allowlist. |
+| `apply-seccomp` | The helper that blocks `AF_UNIX`. `ocs` refuses to start without it rather than run with unblocked sockets. |
+| `@anthropic-ai/sandbox-runtime` | Reports the pinned version actually loaded, so a stale install is visible. |
+| `opencode` | Resolved through `PATH` and checked against the policy. |
+| host config | Whether `~/.config/ocs/config.json` exists. |
+
+Exits non-zero while anything required is missing.
+
+#### If `opencode` is "outside every readable path"
+
+`ocs` runs `opencode` *inside* the sandbox, so `opencode` itself has to be readable
+under the compiled policy. A system-wide install at `/usr/bin/opencode` is covered
+by the `/usr` grant and this never comes up. An opencode installed by its own
+installer, by nvm, or into a user-local npm prefix lives under `$HOME` — and the
+policy denies the home directory wholesale, re-opening only specific paths inside
+it. Those four directories are opencode's *config and state*, never the directory
+its *executable* happens to be in.
+
+The failure is a bare `127`, which reads like a typo. So `ocs` checks before it
+starts and refuses with the fix rather than letting you find out:
+
+```
+Refusing to start: 1 problem(s) with the command this sandbox exists to run.
+
+  [FAIL] opencode: /home/you/.local/bin/opencode is outside every directory this
+         policy can read
+         ...
+           ocs -m /home/you/.local/bin ~/Workspace/my-project
+```
+
+It never grants the path itself. Quietly adding wherever `opencode` happens to live
+to the read mounts would make the check pass, and would also mean one command's
+location silently becomes part of the security policy of every later run. Your
+interpreter is checked too — `opencode` on a user-local node needs *both* granted,
+and fixing only the first still exits `127`.
 
 ### Inspecting the policy
 
@@ -392,6 +474,28 @@ exist yet are resolved against the nearest existing ancestor, so a not-yet-creat
 Paths from `-m`/`-n` on the command line are trusted — you typed them — but are
 still resolved to absolute and shown in `--explain`.
 
+#### What the second clause does and does not allow
+
+Naming a global grant is *accepted*, and that is a decision rather than an
+oversight: it adds nothing, because every project already has it. A repo shipping
+`mounts.read: ["../../.config/opencode"]` gets back the path it could already read,
+so there is no widening to prevent — the gate is deciding "can this repo ask for
+something it did not have", and it had it.
+
+The consequence worth stating plainly is that a project config can therefore reach
+`~/.config/opencode` on write. That is the open question in
+[PLAN.md](PLAN.md) — the agent can rewrite its own model and MCP configuration —
+and it is reachable through the global-grant allowance rather than through any
+decision to allow it. It is inert today because those paths are already inside the
+trust boundary of every session, and it is pinned by a test so the answer is
+deliberate rather than incidental.
+
+The system directories (`/usr`, `/etc`, …) are deliberately **not** in the grant
+list, even though they are read defaults. They are in the policy because the
+sandbox needs a userland to exist at all; a project naming one is a containment
+failure. "Needed to boot" and "granted on request" are different claims and the
+gate keeps them apart.
+
 ### Config tampering
 
 `<project-path>/.ocs/config.json` is inside the writable project directory, so the
@@ -573,6 +677,16 @@ The test suite is mostly about the merge layer, because that is where the securi
 decisions live. Integration tests that actually invoke `bwrap` are a smaller,
 separately-gated set, skipped when `bwrap` is absent.
 
+One rule the suite holds itself to, learned the hard way: **a security assertion
+must not derive its subject from the ambient environment.** Three separate bugs
+here were assertions that passed on the author's machine and tested nothing
+elsewhere — read-deny globs expanded against the working directory, and an
+adversarial fixture built in `os.tmpdir()` whose `../../etc` resolved to `/etc` at
+the default `TMPDIR` and to `/tmp/etc` — an already-granted path — anywhere deeper.
+The adversarial suite now builds its fixtures in the home tree and asserts that
+premise explicitly, so moving them somewhere granted fails loudly instead of
+quietly.
+
 Two of those integration tests exist because the bugs they cover were invisible to
 unit tests that only inspect the compiled policy:
 
@@ -629,7 +743,7 @@ on the host, before any of it is wired to the library.
 
 ## License
 
-MIT.
+MIT — see [LICENSE](LICENSE).
 
 ## Acknowledgements
 

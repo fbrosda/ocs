@@ -7,7 +7,12 @@ import {
   ProvenanceEntry,
   SrtKeys,
 } from "./types.js";
-import { expandTilde, getGlobalGrantDirs, normalizePath } from "./paths.js";
+import {
+  expandTilde,
+  getGlobalGrantDirs,
+  isAtOrUnder,
+  normalizePath,
+} from "./paths.js";
 
 function unionArrays(a: string[], b: string[]): string[] {
   return [...new Set([...a, ...b])];
@@ -137,10 +142,6 @@ function resolveWithContainment(
       "repo legitimately needs it, you can grant it for one run from your own shell:\n" +
       `  ocs -w ${candidate} ${proj}`,
   };
-}
-
-function isAtOrUnder(candidate: string, root: string): boolean {
-  return candidate === root || candidate.startsWith(root + path.sep);
 }
 
 function nearestExistingAncestor(abs: string): string {

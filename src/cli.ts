@@ -3,6 +3,7 @@ import { Command } from "commander";
 import * as path from "path";
 import * as fs from "fs";
 import * as os from "os";
+import { createRequire } from "module";
 import {
   applyHostConfig,
   CliGrants,
@@ -16,6 +17,30 @@ import {
   normalizePath,
 } from "./config/paths.js";
 import { getDefaultHostConfig } from "./config/defaults.js";
+import {
+  checkOpencodeReachable,
+  formatFindings,
+  hasFailure,
+} from "./preflight.js";
+
+/**
+ * The version, from `package.json` rather than a literal.
+ *
+ * Hardcoding it works exactly until the first release bump, at which point
+ * `ocs --version` confidently reports a version that is not installed — and a
+ * bug report quoting it is then worse than useless. Resolved relative to this
+ * module so it is correct from `src/` under tsx, from `dist/`, and from a
+ * global install.
+ */
+function readPackageVersion(): string {
+  try {
+    const require = createRequire(import.meta.url);
+    const pkg = require("../package.json") as { version?: unknown };
+    return typeof pkg.version === "string" ? pkg.version : "unknown";
+  } catch {
+    return "unknown";
+  }
+}
 
 /**
  * Single-quote one argument for the shell that ends up running the command.
@@ -63,7 +88,7 @@ const program = new Command();
 program
   .name("ocs")
   .description("Run OpenCode inside an OS-level sandbox")
-  .version("0.0.1")
+  .version(readPackageVersion())
   .argument("[project-path]", "Project path", process.cwd())
   .option(
     "-m, --mount <path>",
@@ -159,6 +184,20 @@ program
             )
           );
           process.exit(0);
+        }
+
+        // Refuse before starting anything, not after. `opencode` is the command
+        // being sandboxed, so if the policy cannot read it the run ends in a
+        // bare `127` that points at the wrong thing entirely. Failing here costs
+        // one PATH lookup and names the actual fix.
+        const unreachable = checkOpencodeReachable(config, projectPath);
+        if (hasFailure(unreachable)) {
+          throw new ConfigError(
+            `Refusing to start: ${unreachable.length} problem(s) with the command this sandbox exists to run.\n\n` +
+              `${formatFindings(unreachable)}\n\n` +
+              "`ocs doctor` runs the same checks and nothing else, so it is safe to run while\n" +
+              "you are still setting the machine up."
+          );
         }
 
         if (options.debug) {
@@ -289,6 +328,29 @@ program
 
     fs.writeFileSync(homeConfigPath, `${JSON.stringify(config, null, 2)}\n`);
     console.log(`\nCreated ${homeConfigPath}`);
+  });
+
+program
+  .command("doctor")
+  .description("Check that this machine can actually run the sandbox")
+  .argument("[project-path]", "Project to judge opencode reachability against")
+  .action(async (projectPathArg: string | undefined) => {
+    // Imported lazily with the rest of the sandbox machinery, so `--print-config`
+    // and `--help` never load the runtime. This one does load it — resolving the
+    // pinned version is the point.
+    const { runDoctor } = await import("./doctor.js");
+    const report = await runDoctor(projectPathArg);
+
+    console.log(
+      `ocs doctor — ${os.platform()}/${os.arch()}, node ${process.version}\n`
+    );
+    console.log(formatFindings(report.findings));
+    console.log(
+      report.ok
+        ? "\nNothing missing. `ocs init` writes the host config; `ocs <project>` runs the sandbox."
+        : "\nSomething required is missing. Nothing above is optional."
+    );
+    process.exitCode = report.ok ? 0 : 1;
   });
 
 /**

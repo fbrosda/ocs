@@ -2,13 +2,24 @@
   "name": "ocs",
   "version": "0.0.1",
   "description": "OpenCode Sandbox - run OpenCode in an OS-level sandbox",
-  "main": "dist/index.js",
+  "license": "MIT",
+  "author": "Fabian Brosda <f.brosda@gmx.de>",
   "bin": {
     "ocs": "./dist/cli.js"
   },
   "type": "module",
+  "files": [
+    "dist/",
+    "README.md",
+    "LICENSE",
+    "ocs.schema.json"
+  ],
+  "os": [
+    "linux",
+    "darwin"
+  ],
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && chmod +x dist/cli.js",
     "test": "vitest run",
     "test:int": "vitest run --config vitest.integration.config.ts",
     "dev": "tsx src/cli.ts",
@@ -19,14 +30,15 @@
   "engines": {
     "node": ">=20"
   },
+  "publishConfig": {
+    "access": "public"
+  },
   "keywords": [
     "opencode",
     "sandbox",
     "bubblewrap",
     "srt"
   ],
-  "author": "",
-  "license": "MIT",
   "dependencies": {
     "@anthropic-ai/sandbox-runtime": "0.0.78",
     "commander": "^14.0.0",
