@@ -1,9 +1,5 @@
 import { describe, it, expect, beforeEach } from "vitest";
-import {
-  mergeConfigs,
-  ConfigError,
-  validateContainment,
-} from "../../src/config/merge.js";
+import { mergeConfigs, ConfigError } from "../../src/config/merge.js";
 import { getDefaultHostConfig } from "../../src/config/defaults.js";
 import * as fs from "fs";
 import * as path from "path";

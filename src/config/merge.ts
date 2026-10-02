@@ -3,10 +3,6 @@ import * as path from "path";
 import { OcsConfig, OcsConfigSchema, Provenance, ProvenanceEntry, SrtKeys } from "./types.js";
 import { normalizePath } from "./paths.js";
 
-function deepClone<T>(obj: T): T {
-  return JSON.parse(JSON.stringify(obj));
-}
-
 function unionArrays(a: string[], b: string[]): string[] {
   const set = new Set(a);
   for (const item of b) {
@@ -62,7 +58,7 @@ function resolvePathWithContainment(projectPath: string, candidate: string): { o
             try {
               const real = fs.realpathSync(current);
               checkPath = real;
-            } catch (e) {
+            } catch {
               checkPath = current;
             }
             found = true;
@@ -74,10 +70,9 @@ function resolvePathWithContainment(projectPath: string, candidate: string): { o
           checkPath = abs;
         }
       }
-    } catch (e) {
+    } catch {
       // ignore
     }
-    const projNorm = normalizePath(proj);
     const sep = path.sep;
     const projNorm2 = normalizePath(proj);
     if (checkPath === projNorm2) return { ok: true, absolute: abs };

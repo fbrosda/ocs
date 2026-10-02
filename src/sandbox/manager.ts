@@ -37,6 +37,12 @@ export function buildSrtConfig(ocsConfig: OcsConfig, projectPath: string): any {
     deniedDomains: ocsConfig.network.deny || [],
   };
 
+  // `ocs` groups these under `srt` because they are the settings that remove
+  // the sandbox rather than widen it (invariant 3). `srt` is not however where
+  // it reads them: these two live under `network`, the other four at the top
+  // level. Spreading all six flat puts two of them somewhere the config schema
+  // strips without a word, which turns "allow unix sockets" into a no-op that
+  // looks configured.
   const config: any = {
     filesystem,
     network,
@@ -44,7 +50,13 @@ export function buildSrtConfig(ocsConfig: OcsConfig, projectPath: string): any {
 
   // Add srt settings if present
   if (ocsConfig.srt) {
-    Object.assign(config, ocsConfig.srt);
+    for (const [key, value] of Object.entries(ocsConfig.srt)) {
+      if (key === "allowAllUnixSockets" || key === "allowLocalBinding") {
+        network[key] = value;
+      } else {
+        config[key] = value;
+      }
+    }
   }
 
   return config;

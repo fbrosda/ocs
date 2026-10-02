@@ -7,6 +7,36 @@ import { loadJsonConfig, mergeConfigs, ConfigError } from "./config/merge.js";
 import { getHomeConfigPath, getDefaultProjectConfig, normalizePath } from "./config/paths.js";
 import { getDefaultHostConfig } from "./config/defaults.js";
 
+/**
+ * Single-quote one argument for the shell that ends up running the command.
+ *
+ * `srt` takes the command as a *string* and bwrap/bwrap-sh executes it via
+ * `sh -c`, so an argument containing spaces or metacharacters has to be
+ * quoted here or the sandboxed shell re-parses it as syntax.
+ */
+function shellQuote(arg: string): string {
+  return `'${arg.replace(/'/g, `'\\''`)}'`;
+}
+
+/**
+ * The command to run inside the sandbox: `opencode`, plus whatever followed
+ * `--`.
+ *
+ * `command.args` is NOT that list. Commander puts the declared
+ * `[project-path]` operand at index 0, so reading it directly made `ocs .`
+ * try to run `.` — which the sandboxed shell reports as a missing filename.
+ * The documented contract is "everything after `--`", so read that from
+ * argv, and fall back to excess operands for anyone who omits the `--`.
+ */
+function resolveInnerCommand(command: Command, argv: string[]): string {
+  const separator = argv.indexOf("--");
+  const passthrough = separator === -1 ? command.args.slice(1) : argv.slice(separator + 1);
+  if (passthrough.length === 0) {
+    return "opencode";
+  }
+  return ["opencode", ...passthrough].map(shellQuote).join(" ");
+}
+
 const program = new Command();
 
 program
@@ -69,7 +99,7 @@ program
       try {
         await manager.initialize(config, projectPath);
         process.chdir(projectPath);
-        const cmd = program.args.length > 0 ? program.args.join(" ") : "opencode";
+        const cmd = resolveInnerCommand(command, process.argv);
         const wrapped = await manager.wrap(cmd);
         const { spawn } = await import("child_process");
         const child = spawn("sh", ["-c", wrapped], {
@@ -122,7 +152,7 @@ program
         if (oc.providers) {
           console.log("Inferring providers from", opencodeConfigPath);
         }
-      } catch (e) {
+      } catch {
         // ignore
       }
     }

@@ -70,8 +70,9 @@ Each fixture should correspond to a case in the containment table in `PLAN.md`.
   globally, and not on `PATH`. Do not bump it casually: versions ≤ 0.0.77 have a zsh
   bug where a failing command reports exit 0, and the whole point of depending on it
   is that its behaviour is predictable.
-- `socat` is missing on this machine and needs `sudo pacman -S socat`. Report it; the
-  user installs it. Do not install, vendor or shim it.
+- `socat`, `bwrap` and `ripgrep` are present on this machine, so the Linux sandbox
+  path — including the network proxy — is exercisable here. The rule above still
+  applies if one is ever missing: report it, do not install, vendor or shim it.
 
 ## Commands
 

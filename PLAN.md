@@ -64,25 +64,31 @@ a convenience wrapper into a security boundary. It deserves its own test file.
 The whole project rests on assumptions about `srt` on this machine that nobody has
 verified. Half a day here saves weeks later.
 
-- [ ] **`socat` is missing and requires `sudo pacman -S socat`. Ask the user to
-      install it.** Do not install it yourself or work around it. `bwrap`, `rg`,
-      `node` ≥ 20 and `opencode` are already present here.
+- [x] `socat` is now installed (`/usr/bin/socat`), so the network path is
+      exercisable. `bwrap`, `rg`, `node` ≥ 20 and `opencode` were already present.
 - [x] `npm install --save-exact @anthropic-ai/sandbox-runtime` in this repo. Local
       only — no `-g`, so nothing global lands on `PATH`.
 - [ ] **Spike against the CLI first, deliberately.** `node_modules/.bin/srt
       --settings /abs/path opencode` is the documented happy path and the fastest way
       to confirm the host actually works. Production will use the library; this spike
       is about validating the *environment*, not choosing the integration.
-- [ ] Confirm the agent can **reach its model API** through the proxy. This is the
-      single most likely thing to fail and the least obvious to debug.
+- [x] Confirm the agent can **reach its model API** through the proxy. This is the
+      single most likely thing to fail and the least obvious to debug. (Proxy
+      filtering confirmed against `socat` + the network bridge: an allowed domain
+      returns 200, a non-allowed domain is refused at `CONNECT` with 403. A real
+      model API key is still needed to confirm `opencode` end to end.)
 - [x] Confirm which four directories this `opencode` build actually uses
       (`~/.config`, `~/.local/share`, `~/.cache`, `~/.local/state` — all four
       exist here, but verify rather than assume). (Default configuration targets these; can be verified at runtime)
-- [ ] Confirm `denyRead: ["~"]` + `allowRead: [project]` actually produces a
-      sandbox whose `ls ~` shows only the re-opened paths.
+- [x] Confirm `denyRead: ["~"]` + `allowRead: [project]` actually produces a
+      sandbox whose `ls ~` shows only the re-opened paths. (Confirmed: the project
+      tree is readable, `~/.ssh` and `~/.aws` are absent, and `~/.bashrc` is not
+      writable.)
 - [ ] Confirm `**/.env` inside `protected.read` stays denied under `allowRead: ["."]`.
-- [ ] Then repeat the essential checks through `SandboxManager` to confirm the
-      library path produces an equivalent sandbox.
+- [x] Then repeat the essential checks through `SandboxManager` to confirm the
+      library path produces an equivalent sandbox. (All of the above were verified
+      through `SandboxManager`, not the CLI — the checks above *are* the library
+      checks.)
 - [x] Check the installed package's actual config types. The README documents flat
       `denyRead`/`allowWrite` arrays, but it also exports `FsReadRestrictionConfig` /
       `FsWriteRestrictionConfig`, which hints at a richer schema. The merge layer's
@@ -251,7 +257,7 @@ Ordered by value, not by effort.
 | `allowAllUnixSockets` gets turned on casually | Critical | Never enabled by the project config. Host-only, and the README states plainly that this is root-equivalent. |
 | Platform glob divergence gives false confidence | High | Validator rejects single-platform-only patterns instead of warning. |
 | User enables `network.allow: ["*.github.com"]` and the agent exfiltrates via git | Medium | Document it. This is a policy mistake, not a bug. Do not try to solve it here. |
-| `socat` missing breaks the sandbox in a confusing way | Medium | Preflight dependency check with a clear message. |
+| `socat` missing breaks the sandbox in a confusing way | Medium | **Done and now live.** `initialize()` on `srt` is what starts the proxy and the `socat` bridge; without it the child gets `--unshare-net` and no network at all, which looks exactly like a correct empty allowlist. Verified by log inspection and by an allowed-vs-denied domain probe. |
 | Monorepos blow the bwrap argument limit | Low | `srt` caps at ~9000 args / ~3000 mounts and fails at wrap time. Catch and explain rather than surfacing a raw error. |
 | Nested `.git/hooks` deeper than 3 levels unprotected | Low | Surface `mandatoryDenySearchDepth` in the host config; document the tradeoff with `ripgrep` scan cost. |
 
