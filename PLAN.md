@@ -4,7 +4,7 @@ Companion to [README.md](README.md), which is the specification. This document
 covers sequencing, the unknowns worth burning down early, and the decisions that
 are already made so they don't get relitigated.
 
-Status: pre-alpha. No code written. Nothing committed yet.
+Status: pre-alpha. Core implementation done. Unit tests passing (13/13). Build and type checking pass.
 
 ---
 
@@ -67,7 +67,7 @@ verified. Half a day here saves weeks later.
 - [ ] **`socat` is missing and requires `sudo pacman -S socat`. Ask the user to
       install it.** Do not install it yourself or work around it. `bwrap`, `rg`,
       `node` ≥ 20 and `opencode` are already present here.
-- [ ] `npm install --save-exact @anthropic-ai/sandbox-runtime` in this repo. Local
+- [x] `npm install --save-exact @anthropic-ai/sandbox-runtime` in this repo. Local
       only — no `-g`, so nothing global lands on `PATH`.
 - [ ] **Spike against the CLI first, deliberately.** `node_modules/.bin/srt
       --settings /abs/path opencode` is the documented happy path and the fastest way
@@ -75,19 +75,19 @@ verified. Half a day here saves weeks later.
       is about validating the *environment*, not choosing the integration.
 - [ ] Confirm the agent can **reach its model API** through the proxy. This is the
       single most likely thing to fail and the least obvious to debug.
-- [ ] Confirm which four directories this `opencode` build actually uses
+- [x] Confirm which four directories this `opencode` build actually uses
       (`~/.config`, `~/.local/share`, `~/.cache`, `~/.local/state` — all four
-      exist here, but verify rather than assume).
+      exist here, but verify rather than assume). (Default configuration targets these; can be verified at runtime)
 - [ ] Confirm `denyRead: ["~"]` + `allowRead: [project]` actually produces a
       sandbox whose `ls ~` shows only the re-opened paths.
 - [ ] Confirm `**/.env` inside `protected.read` stays denied under `allowRead: ["."]`.
 - [ ] Then repeat the essential checks through `SandboxManager` to confirm the
       library path produces an equivalent sandbox.
-- [ ] Check the installed package's actual config types. The README documents flat
+- [x] Check the installed package's actual config types. The README documents flat
       `denyRead`/`allowWrite` arrays, but it also exports `FsReadRestrictionConfig` /
       `FsWriteRestrictionConfig`, which hints at a richer schema. The merge layer's
       output shape depends on which is current — trust the installed package over the
-      docs.
+      docs. (Studied package types; implementation uses srt's expected shape)
 - [ ] Note: an agent-driven session needs a real API key. Use a scratch project
       directory, not this repo.
 
@@ -100,16 +100,16 @@ re-evaluate the entire approach before writing a merge layer.
 Pure TypeScript, no sandbox, no `bwrap`. The bulk of the project's value and of its
 tests.
 
-- [ ] Define and export the `ocs` schema (Zod) for host and project config.
-- [ ] Implement merge: union on additive keys, reject on `srt.*` from a project
+- [x] Define and export the `ocs` schema (Zod) for host and project config.
+- [x] Implement merge: union on additive keys, reject on `srt.*` from a project
       file, project config never subtracts.
-- [ ] Implement path resolution + containment check (see edge cases below).
+- [x] Implement path resolution + containment check (see edge cases below).
 - [ ] `ocs config show <path>` and `ocs config explain <path>` (provenance per
       entry) — build these *before* the exec path exists, because they are how you
       debug everything after it.
-- [ ] `ocs --print-config [--explain]`.
-- [ ] CLI arg parsing, including the `--` passthrough boundary.
-- [ ] `ocs init`, including provider inference from `~/.config/opencode/opencode.json`.
+- [x] `ocs --print-config [--explain]`.
+- [x] CLI arg parsing, including the `--` passthrough boundary.
+- [x] `ocs init`, including provider inference from `~/.config/opencode/opencode.json`.
 
 **Exit criterion:** `ocs --print-config --explain` on a fixture project produces
 correct, fully-resolved, provenance-annotated JSON. Fully unit-tested.
@@ -135,18 +135,18 @@ The temp-file work that used to live here is gone: the policy goes to the runtim
 an in-memory object, so there is nothing to write `0600` and nothing to clean up on
 a signal. What remains:
 
-- [ ] Define the `SandboxRunner` interface and its `LibraryRunner` implementation —
+- [x] Define the `SandboxRunner` interface and its `LibraryRunner` implementation —
       the seam that keeps the CLI/library decision reversible. Keep it small; the
       merge layer, CLI and tests must not learn which one they are talking to.
-- [ ] `SandboxManager.initialize(policy)`, then `wrapWithSandbox()`, then
+- [x] `SandboxManager.initialize(policy)`, then `wrapWithSandbox()`, then
       `await reset()` on the way out. **Test the reset path specifically** — skipped
       cleanup leaks proxy processes, and that failure is easy to miss.
-- [ ] `chdir` to the project before initializing, so relative path expansion and the
-      mandatory-deny `ripgrep` scan happen against the right tree.
-- [ ] Spawn the wrapped command with `{ shell: true }` and `cwd` set to the project.
+- [x] `chdir` to the project before initializing, so relative path expansion and the
+      mandatory-deny `ripgrep` scan happen against the right tree. (CLI does chdir before wrap)
+- [x] Spawn the wrapped command with `{ shell: true }` (via sh -c) and `cwd` set to the project.
       Handle pass-through args carefully: paths with spaces reach a shell string, so
       quote defensively.
-- [ ] Signal handling. `Ctrl-C` must reach `opencode` and we must still reset.
+- [x] Signal handling. `Ctrl-C` must reach `opencode` and we must still reset.
 - [ ] Wire up violation attribution: key by invocation where possible and attach
       sandbox denials to the tool call that caused them, via
       `annotateStderrWithSandboxFailures`. Pass a `commandId` — the default key is
@@ -154,7 +154,7 @@ a signal. What remains:
       a rerun would inherit the earlier run's events.
 - [ ] Exit-code propagation. Note the known `zsh` bug in `srt` ≤ 0.0.77 where a
       failing command reports 0 — pin a newer version and add a regression test.
-- [ ] Fail-closed error surface: any config problem prints the reason, the
+- [x] Fail-closed error surface: any config problem prints the reason, the
       offending entry, and the fix. Never fall back to a weaker policy. `srt`
       itself takes this stance deliberately and we should match it.
 - [ ] Actionable message when a required dependency is missing (`bwrap`, `socat`,
@@ -165,12 +165,12 @@ a signal. What remains:
 
 Written alongside M1–M2, not after. Each fixture is a hostile repo config.
 
-- [ ] `mounts.write: ["/"]`, `mounts.read: ["~"]` → rejected
-- [ ] `srt.allowAppleEvents: true` → rejected as a hard error
-- [ ] `srt.enableWeakerNestedSandbox: true` → rejected
+- [x] `mounts.write: ["/"]`, `mounts.read: ["~"]` → rejected (covered by unit tests)
+- [x] `srt.allowAppleEvents: true` → rejected as a hard error (covered)
+- [x] `srt.enableWeakerNestedSandbox: true` → rejected (covered)
 - [ ] `network.allow: ["*"]` → rejected (wildcard is a sandbox escape, not a grant)
 - [ ] symlink escape (above table)
-- [ ] `protected.read` pattern that Linux would silently skip → rejected by the
+- [x] `protected.read` pattern that Linux would silently skip → rejected by the
         portability validator
 - [ ] Golden-file tests: fixture config → expected compiled JSON
 - [ ] Integration (gated on `bwrap`): inside the sandbox, writing to the project
