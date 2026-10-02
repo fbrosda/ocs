@@ -4,7 +4,8 @@ Companion to [README.md](README.md), which is the specification. This document
 covers sequencing, the unknowns worth burning down early, and the decisions that
 are already made so they don't get relitigated.
 
-Status: pre-alpha. Core implementation done. Unit tests passing (13/13). Build and type checking pass.
+Status: pre-alpha. Core implementation done. Unit tests passing (85/85), integration
+tests passing (6/6, needs `bwrap`). Build, type check, lint and format all clean.
 
 ---
 
@@ -55,6 +56,33 @@ So the merge has two independent gates, and both are required:
 The second gate is the one that is easy to forget and the one that turns this from
 a convenience wrapper into a security boundary. It deserves its own test file.
 
+### The glob anchoring fix — why this counts as a security change
+
+The built-in `protected.read` defaults are credential globs like `**\/.env`. They
+are expanded against `process.cwd()`, not the project, so they expanded to `[]`
+unless `ocs` was launched from the project tree. Verified empirically: with cwd
+set to `/`, the expansion of an unanchored `**\/.env` returned nothing.
+
+That is a fail-open bug in a security policy and it was invisible to any test
+looking at config *shape* — the compiled policy had a `denyRead` full of
+well-formed globs that matched nothing. It is also exactly what the M0 checklist
+item was for.
+
+The fix anchors relative read-deny globs at compile time against the project path
+and opencode's own directories, so each pattern has the literal directory Linux
+needs to walk from. `/tmp` is deliberately not an anchor. Absolute patterns are
+left alone, and a root-anchored absolute one is still refused.
+
+Two decisions worth not relitigating:
+
+- **Anchor rather than reject.** Rejecting `**\`-prefixed patterns would have been
+  simpler but would forbid the one form users will reach for, in exchange for a
+  guarantee the built-ins could never satisfy.
+- **Reuse srt's criterion, not our own.** `hasLiteralBase` mirrors srt's own
+  `globPatternBaseDir` so the validator agrees with the expander by construction.
+  And the expandability test asserts through srt's `expandReadDenyGlobLinux`
+  rather than a reimplementation — agreeing with ourselves would prove nothing.
+
 ---
 
 ## Milestones
@@ -84,7 +112,12 @@ verified. Half a day here saves weeks later.
       sandbox whose `ls ~` shows only the re-opened paths. (Confirmed: the project
       tree is readable, `~/.ssh` and `~/.aws` are absent, and `~/.bashrc` is not
       writable.)
-- [ ] Confirm `**/.env` inside `protected.read` stays denied under `allowRead: ["."]`.
+- [x] Confirm `**\/.env` inside `protected.read` stays denied under `allowRead: ["."]`.
+      (This is where the fail-open bug was found: the pattern is expanded against
+      the *working directory*, so from anywhere but the project it expanded to `[]`
+      and the built-in credential protection was a no-op. Now anchored at compile
+      time against the project and opencode's dirs — see "The glob anchoring fix"
+      below.)
 - [x] Then repeat the essential checks through `SandboxManager` to confirm the
       library path produces an equivalent sandbox. (All of the above were verified
       through `SandboxManager`, not the CLI — the checks above *are* the library
@@ -158,8 +191,12 @@ a signal. What remains:
       `annotateStderrWithSandboxFailures`. Pass a `commandId` — the default key is
       the command text, so long commands sharing a prefix would cross-attribute and
       a rerun would inherit the earlier run's events.
-- [ ] Exit-code propagation. Note the known `zsh` bug in `srt` ≤ 0.0.77 where a
+- [x] Exit-code propagation. Note the known `zsh` bug in `srt` ≤ 0.0.77 where a
       failing command reports 0 — pin a newer version and add a regression test.
+      (Pinned 0.0.78, which fixes the trap. `test/sandbox/exit-code.int.test.ts`
+      asserts 0 / 1 / 42 / 127 — not just "non-zero", because a wrapper that
+      collapses 2 and 127 into 1 loses a distinction callers may be making.
+      `binShell` is left undefined so bash is used and asserted as the default.)
 - [x] Fail-closed error surface: any config problem prints the reason, the
       offending entry, and the fix. Never fall back to a weaker policy. `srt`
       itself takes this stance deliberately and we should match it.
@@ -174,11 +211,14 @@ Written alongside M1–M2, not after. Each fixture is a hostile repo config.
 - [x] `mounts.write: ["/"]`, `mounts.read: ["~"]` → rejected (covered by unit tests)
 - [x] `srt.allowAppleEvents: true` → rejected as a hard error (covered)
 - [x] `srt.enableWeakerNestedSandbox: true` → rejected (covered)
-- [ ] `network.allow: ["*"]` → rejected (wildcard is a sandbox escape, not a grant)
-- [ ] symlink escape (above table)
+- [x] `network.allow: ["*"]` → rejected (wildcard is a sandbox escape, not a grant)
+- [x] symlink escape (above table)
 - [x] `protected.read` pattern that Linux would silently skip → rejected by the
         portability validator
-- [ ] Golden-file tests: fixture config → expected compiled JSON
+- [ ] Golden-file tests: fixture config → expected compiled JSON. Partly covered:
+      `test/sandbox/compile.test.ts` checks enforceability by expanding through
+      *srt's own* expander rather than against a fixture, which is a stronger
+      assertion but not the readable diff a golden file gives.
 - [ ] Integration (gated on `bwrap`): inside the sandbox, writing to the project
       succeeds, `cat ~/.ssh/id_rsa` fails, `curl` to an unlisted domain fails,
       `touch /etc/x` fails
@@ -188,8 +228,16 @@ Written alongside M1–M2, not after. Each fixture is a hostile repo config.
 - [ ] `PKGBUILD`: pinned `@anthropic-ai/sandbox-runtime`, deps
       `bubblewrap socat ripgrep nodejs`, `arch=('x86_64' 'aarch64')` — `srt` ships
       prebuilt `apply-seccomp` for those two only.
-- [ ] Verify the seccomp binary actually loads on this kernel. If it silently falls
+- [x] Verify the seccomp binary actually loads on this kernel. If it silently falls
       back, say so loudly at runtime rather than pretending Unix sockets are blocked.
+      (Two findings. **It was never bound**: srt emits `apply-seccomp` into the bwrap
+      command line and assumes visibility, which holds for a global install and not
+      for a library dep — every sandboxed command exited 127 until the binary was
+      bound into `allowRead` and pinned via `seccomp.applyPath`. **And it does load**:
+      an `AF_UNIX` bind inside the sandbox now returns `EPERM`, and returns success
+      with `allowAllUnixSockets`, so both directions are asserted in
+      `test/sandbox/seccomp.int.test.ts`. `ocs` now fails closed if the helper is
+      missing while the policy claims sockets are blocked.)
 - [ ] macOS: install path, platform capability detection, no `socat` dependency.
 - [ ] **Verify opencode's directory layout on macOS** — the four XDG paths are the
       Linux assumption and may differ under `~/Library/Application Support`. Do not

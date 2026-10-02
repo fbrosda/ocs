@@ -28,7 +28,7 @@
   "author": "",
   "license": "MIT",
   "dependencies": {
-    "@anthropic-ai/sandbox-runtime": "0.0.77",
+    "@anthropic-ai/sandbox-runtime": "0.0.78",
     "commander": "^14.0.0",
     "zod": "^4.1.9"
   },

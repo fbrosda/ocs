@@ -27,7 +27,13 @@ default. See [Security model](#security-model).
 
 ## Status
 
-**Pre-alpha.** This document is the specification. No code is written yet.
+**Pre-alpha.** This document is the specification; the implementation has
+outgrown parts of it and the gaps are tracked in [PLAN.md](PLAN.md).
+
+Implemented and tested: the config model, the merge layer with both security
+gates, policy compilation, the `SandboxRunner` seam over `srt`, and the CLI.
+Linux is the working target. macOS is unverified. Known gaps are listed under
+[Development](#development).
 
 ---
 
@@ -122,15 +128,19 @@ through to `opencode`.
 | `-w, --mount-write <path>` | Extra writable bind for this run. Repeatable. |
 | `-n, --domain <domain>` | Add an allowed domain for this run. Repeatable. |
 | `-c, --config <path>` | Use an alternate project config file. |
-| `--print-config` | Print the compiled `srt` settings and exit. Runs no sandbox. |
+| `--print-config` | Print the compiled policy and exit. Runs no sandbox. |
 | `--explain` | With `--print-config`, annotate each entry with its origin. |
 | `--debug` | Pass `SRT_DEBUG=1` through to `srt`. |
-| `-y, --yes` | Do not prompt. |
 | `-V, --version` / `-h, --help` | |
 
-`-m` and `-n` are the escape hatch: a repository's config can *ask* for extra
-access, and only you can grant it. When a project's compiled policy needs a grant
-you have not made, `ocs` prints the exact command to re-run with the flag added.
+`-m`, `-w` and `-n` are a separate trust channel from both config files: you
+typed them in your own shell, so they skip the containment gate that a
+repository's config goes through. They are still resolved to absolute paths, and
+they are reported as `cli` by `--explain`, so an entry that escaped the gate is
+visible as such.
+
+The same paths in a project config are rejected. That asymmetry is the point —
+see [Security model](#security-model).
 
 ### Inspecting the policy
 
@@ -138,9 +148,15 @@ you have not made, `ocs` prints the exact command to re-run with the flag added.
 ocs ~/Workspace/my-project --print-config --explain
 ```
 
-`--explain` prints every entry tagged with where it came from — `host` or
+`--explain` prints every entry tagged with where it came from — `host`, `cli`, or
 `project:my-project` — which is the fastest way to answer "what is this repo
 actually asking for?"
+
+Without `--explain`, `--print-config` emits the object handed to the sandbox
+runtime, not an intermediate `ocs` representation. Read-deny globs are anchored
+to absolute paths, `srt.*` settings are relocated to the keys the runtime reads,
+and a policy that could not be enforced is an error rather than output. So the
+JSON you see is the policy that would run.
 
 ---
 
@@ -369,6 +385,26 @@ and enforcement.
 - **Default-deny network.** No domains means no network at all, enforced by removing
   the network namespace, not by hoping the process reads `HTTP_PROXY`.
 
+### Unix socket blocking is ours to keep working
+
+`srt` blocks `socket(AF_UNIX, ...)` with a seccomp filter applied by a static
+helper binary it ships. It resolves that binary on the host and puts it on the
+sandbox's command line, but does not bind it — which is fine for a global install
+where it sits under a readable `/usr`, and not for a library dependency, where it
+lives inside `node_modules` next to `ocs` and the read policy denies the home
+directory.
+
+`ocs` therefore binds that one file explicitly and names the same path in the
+config, so the binary that is bound is the binary that is executed. Skip this and
+every sandboxed command exits 127 with `apply-seccomp: No such file or directory`.
+
+Because a seccomp filter that fails to load is invisible from the outside —
+`srt` reports success — `ocs` does not take this on trust. If the policy says Unix
+sockets are blocked and the helper cannot be found, it refuses to start and says
+why, rather than starting a sandbox with an open route to every socket on the
+host. The documented escape hatch (`srt.allowAllUnixSockets`, host config only)
+still works, and on that setting no helper is bound at all since none is used.
+
 ### Known weaknesses we accept
 
 - **Allowing `github.com` allows pushing to any repository you have credentials for.**
@@ -457,6 +493,34 @@ A rule that protects a secret on macOS can be a no-op on Linux. `ocs` validates
 that is only honoured on one platform, rather than letting you believe you are
 protected where you are not. This is a deliberate fail-closed choice.
 
+### How relative patterns are resolved
+
+Relative patterns in `protected.read` are expanded against the working directory
+at *launch*, not against the project. `**\/.env` written in a config therefore
+expands to nothing unless `ocs` happens to be started from the project tree — the
+credential protection would silently protect nothing in the one situation nobody
+would notice.
+
+So `ocs` rewrites relative read-deny patterns against known roots before handing
+them over: the project path and opencode's own data directories. `**\/.env`
+becomes two absolute patterns, `<project>/**\/.env` and
+`~/.local/share/opencode/**\/.env`, each with the literal directory Linux needs in
+order to walk anything at all. This is what makes the built-in credential globs
+load-bearing rather than decorative.
+
+`/tmp` is deliberately **not** an anchor. Expanding against it would walk all of
+it on every launch to protect against a file nobody put there, and the paths a
+secret actually lands in are the project and opencode's own state.
+
+An absolute pattern is left alone, so an absolute root-anchored one (`**\/*.pem`)
+is still refused — there is no directory above `/` to walk down from, and a rule
+that protects a secret on one platform only is worse than no rule.
+
+Patterns are also checked a second time after the runtime has expanded them,
+because expansion is platform-dependent and a pattern that came in enforceable
+can still come out unenforced. If anything in the compiled policy could not be
+enforced, `ocs` refuses to start and says which pattern it was.
+
 ---
 
 ## Development
@@ -469,7 +533,22 @@ npm run test:int  # integration; needs bubblewrap + socat
 
 The test suite is mostly about the merge layer, because that is where the security
 decisions live. Integration tests that actually invoke `bwrap` are a smaller,
-separately-gated set.
+separately-gated set, skipped when `bwrap` is absent.
+
+Two of those integration tests exist because the bugs they cover were invisible to
+unit tests that only inspect the compiled policy:
+
+- **Exit-status propagation.** A failing command must report failure. (`srt` ≤ 0.0.77
+  reported exit 0 under zsh.)
+- **Unix socket blocking, in both directions.** Confirmed by binding an `AF_UNIX`
+  listener inside the sandbox and checking it is refused — and confirming that
+  `allowAllUnixSockets: true` makes the same probe succeed. The second half is the
+  control: without it the first half would also pass on a machine where the policy
+  had no effect at all.
+
+Known gaps, in rough priority order, are tracked in [PLAN.md](PLAN.md). The two
+that most affect anyone trying this: macOS is unverified, and violation attribution
+is not yet wired up.
 
 ### Design notes: why the library, not the CLI
 

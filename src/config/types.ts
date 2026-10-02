@@ -9,7 +9,7 @@ export const SrtKeys = [
   "mandatoryDenySearchDepth",
 ] as const;
 
-export type SrtKey = typeof SrtKeys[number];
+export type SrtKey = (typeof SrtKeys)[number];
 
 export const OcsConfigSchema = z.object({
   $schema: z.string().optional(),
@@ -53,9 +53,19 @@ export type ResolvedPath = {
   resolvedAncestor?: string;
 };
 
+/**
+ * Where an entry in the compiled policy came from.
+ *
+ * `cli` is a first-class origin rather than folded into `host`. `-m`/`-w`/`-n`
+ * are exempt from the containment gate that untrusted project config goes
+ * through, so a reviewer reading `--explain` needs to be able to see at a
+ * glance which entries skipped that check and why they were allowed to.
+ */
+export type ProvenanceSource = "host" | "cli" | `project:${string}`;
+
 export type ProvenanceEntry = {
-  source: "host" | `project:${string}`;
-  value: any;
+  source: ProvenanceSource;
+  value: unknown;
 };
 
 export type Provenance = {
