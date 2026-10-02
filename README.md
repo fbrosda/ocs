@@ -35,6 +35,11 @@ gates, policy compilation, the `SandboxRunner` seam over `srt`, and the CLI.
 Linux is the working target. macOS is unverified. Known gaps are listed under
 [Development](#development).
 
+The defaults are deliberately small — one provider domain, five credential
+globs, one anchor — because they were measured down from larger first drafts.
+A typical project compiles to 6 `denyRead` entries. See "How relative patterns
+are resolved" for what the globs do and do not cover.
+
 ---
 
 ## Why
@@ -108,8 +113,19 @@ ocs init
 Writes `~/.config/ocs/config.json` with a conservative starting policy, and — if it
 can — infers which model providers you use by reading your existing
 `~/.config/opencode/opencode.json`, so the agent can actually reach its API. It
-prints what it inferred; review it. An empty `network.allow` means the agent cannot
-call any model, and `ocs` is a very expensive way to type.
+prints what it inferred; review it.
+
+The built-in default is a single entry: `opencode.ai`, opencode's own Zen
+endpoint, which works with `opencode auth login` and needs no key anywhere. The
+point is that a first run is usable rather than a sandbox that silently cannot
+call a model. Anthropic, OpenAI and Copilot also support `auth login`, but
+reaching a paid API host by default is a wider grant than "try this out" needs —
+name the ones you use in your own config, or let `ocs init` find them for you.
+
+This file is where per-machine policy lives, and it is the file to edit for
+anything you would otherwise repeat in every project. Lists there are **added to**,
+never substituted: mentioning `network.allow` extends it, and there is no syntax
+anywhere in `ocs` for removing an entry.
 
 ---
 
@@ -267,18 +283,29 @@ else.
 project, because `srt` gives a specific deny precedence over a broader allow:
 
 ```
-**/.env, **/.env.*, **/*.pem, **/*.p12, **/*.key,
-**/id_rsa*, **/id_ed25519*, **/.netrc, **/.npmrc, **/.git-credentials,
-**/.htpasswd, **/credentials.json, **/service-account*.json
+**/.env, **/.env.*, **/.npmrc, **/.netrc, **/.git-credentials
 ```
 
-`.npmrc` and `.git-credentials` deserve a note: they routinely contain live
-registry and Git credentials, and they sit *inside* project directories. If a
-project genuinely needs authenticated package installs, that has to be an explicit
+These are the ones that actually matter, and the deny on `~` does not cover them:
+the project is *inside* the home directory, and `allowRead` re-opens the whole
+subtree, so a committed `.env` is readable unless something names it. That was
+verified by running the sandbox with this list emptied, where `cat .env` printed
+the secret.
+
+`*.pem`, `*.p12`, `*.key`, `id_rsa*`, `credentials.json`, `service-account*.json`
+and `.htpasswd` were in an earlier draft and removed. They are guesses about
+filenames in a repository `ocs` cannot see, and each one multiplies the compiled
+policy. Add them to your host config if your projects need them.
+
+`.npmrc` and `.git-credentials` stay because they routinely contain live registry
+and Git credentials, and they sit inside project directories. If a project
+genuinely needs authenticated package installs, that has to be an explicit
 host-config grant.
 
-**Network.** Allow-only in `srt`, empty by default. `ocs` seeds a small curated
-set so a fresh install works; every entry is host-editable.
+**Network.** Allow-only in `srt`. One entry by default — `opencode.ai`, opencode's
+own Zen endpoint, which needs no key and works with `opencode auth login`. Every
+other provider is yours to name; `ocs init` will infer the ones you already use
+from `~/.config/opencode/opencode.json`.
 
 ### Which keys a project file may set
 
@@ -291,8 +318,18 @@ This is the core of the design, so it is worth stating plainly.
 | `protected.read`, `protected.write` | add (adding a deny only tightens) |
 | `srt.*` | **nothing — hard error** |
 
-Lists are **unioned, never subtracted**. A project config cannot remove a host
-entry, because there is no syntax for removal and there will not be one.
+Lists are **unioned, never subtracted**, on every channel — host file, project
+file, and command line alike. There is no syntax for removal anywhere in `ocs`,
+so no config edit can be the reason a protection quietly stops applying. Only
+`ocs`'s own defaults can be removed, by editing them.
+
+That constraint is load-bearing in a way that is easy to get wrong. An earlier
+version layered the host file over the defaults with a plain object spread, which
+replaces a whole nested object: a user adding one glob to `protected.read` deleted
+the built-in `.env` protection outright, and a user adding one mount deleted `/usr`
+from the read grants. Nothing errored. Silently weaker on an unrelated edit is the
+one outcome worth engineering against, so `applyHostConfig` merges group by group
+and unions every list.
 
 `ocs` does not merge by loading the host config, patching it, and writing it back —
 the project config is parsed into its own structure and merged into a fresh policy,
@@ -501,16 +538,17 @@ expands to nothing unless `ocs` happens to be started from the project tree — 
 credential protection would silently protect nothing in the one situation nobody
 would notice.
 
-So `ocs` rewrites relative read-deny patterns against known roots before handing
-them over: the project path and opencode's own data directories. `**\/.env`
-becomes two absolute patterns, `<project>/**\/.env` and
-`~/.local/share/opencode/**\/.env`, each with the literal directory Linux needs in
-order to walk anything at all. This is what makes the built-in credential globs
-load-bearing rather than decorative.
+So `ocs` rewrites relative read-deny patterns against the project path before
+handing them over. `**\/.env` becomes `<project>/**\/.env`, with the literal
+directory Linux needs in order to walk anything at all. This is what makes the
+built-in credential globs load-bearing rather than decorative.
 
-`/tmp` is deliberately **not** an anchor. Expanding against it would walk all of
-it on every launch to protect against a file nobody put there, and the paths a
-secret actually lands in are the project and opencode's own state.
+The project is the only anchor. An earlier draft also anchored at opencode's own
+state directories and `/tmp`; scanning all four opencode directories found zero
+matches for every default pattern, so those anchors cost 52 entries in the
+compiled policy and protected nothing. Anchoring under `/tmp` would walk all of it
+on every launch to defend against a file nobody put there. A host config that
+really does want a location covered can spell the pattern absolutely.
 
 An absolute pattern is left alone, so an absolute root-anchored one (`**\/*.pem`)
 is still refused — there is no directory above `/` to walk down from, and a rule

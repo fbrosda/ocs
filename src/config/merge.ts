@@ -164,18 +164,21 @@ function nearestExistingAncestor(abs: string): string {
 }
 
 /**
- * Reject path syntax that cannot mean what it appears to mean.
+ * Reject the two path spellings that cannot mean what they appear to mean on
+ * any platform `ocs` supports.
  *
- * These are not escapes on Linux — a NUL byte or a backslash is just an
- * ordinary character in a filename, so `../../etc` spelled with backslashes
- * stays inside the project and the containment check passes it. That is exactly
- * why they matter: the value lands in a security policy as something that
- * looks like a traversal and is inert here, and stays inert only for as long as
- * nothing downstream re-parses it. A policy entry is a thing other software
- * will eventually interpret.
+ * A NUL byte is never a valid filename character, and an empty string is never a
+ * path. Both reach downstream as "the current directory" or as a silently
+ * truncated string depending on who reads them, which is not something to pass
+ * into a security policy.
  *
- * Failing closed costs nothing, because none of these spellings are useful to
- * anyone on either platform.
+ * Deliberately *not* checked: backslashes and Windows drive letters. A backslash
+ * is an ordinary filename character on Linux and macOS alike, so on both
+ * platforms `..\\..\\etc` resolves inside the project and the containment gate
+ * already handles it correctly. Rejecting them was guarding a Windows parsing
+ * difference that does not exist on either target, and refusing valid Unix
+ * filenames containing a backslash — which does not make a sandbox safer, only
+ * harder to configure.
  */
 function validatePathSyntax(raw: string, source: string): void {
   const problems: string[] = [];
@@ -185,14 +188,6 @@ function validatePathSyntax(raw: string, source: string): void {
   }
   if (raw.includes("\0")) {
     problems.push("it contains a NUL byte");
-  }
-  if (raw.includes("\\")) {
-    problems.push(
-      "it contains a backslash, which is a path separator on Windows but an ordinary character here"
-    );
-  }
-  if (/^[a-zA-Z]:/.test(raw)) {
-    problems.push("it looks like a Windows drive-letter path");
   }
 
   if (problems.length > 0) {
@@ -225,82 +220,171 @@ function resolveTrusted(p: string): string {
   return path.resolve(expandTilde(p));
 }
 
-/** Drop a `:port` suffix. Only a bare 1–65535 number counts as one. */
-function stripPort(entry: string): string {
-  const idx = entry.lastIndexOf(":");
-  if (idx === -1 || entry.indexOf(":") !== idx) {
-    return entry;
-  }
-  return /^[1-9][0-9]{0,4}$/.test(entry.slice(idx + 1))
-    ? entry.slice(0, idx)
-    : entry;
-}
-
 /**
- * Whether a pattern is a usable domain grant, mirroring `isValidDomainPattern`
- * in srt.
+ * Reject network grants that name no specific host.
  *
- * Kept in step with srt deliberately rather than approximated: this is the same
- * predicate, reimplemented so `ocs` can say *why* in terms of the repo that
- * asked, at the point where the path is being merged, instead of surfacing an
- * srt schema complaint later from `initialize()`. `validateCompiledPolicy`
- * still runs srt's own schema afterwards, so this copy being wrong could only
- * make us late, not lenient.
- */
-function isUsableDomainPattern(entry: string): boolean {
-  const val = stripPort(entry);
-
-  // A bare IPv6 literal, e.g. `[::1]` or `[::1]:443`.
-  if (val.includes(":") && (val.startsWith("[") || val.includes("::"))) {
-    return true;
-  }
-  // A protocol, path or port that survived stripping is not a host.
-  if (val.includes("://") || val.includes("/") || val.includes(":")) {
-    return false;
-  }
-  if (val === "localhost") {
-    return true;
-  }
-  if (val.startsWith("*.")) {
-    // At least two labels after the wildcard: `*.example.com` is a bounded
-    // grant, `*.com` is every site on the internet.
-    const parts = val.slice(2).split(".");
-    return parts.length >= 2 && parts.every((p) => p.length > 0);
-  }
-  if (val.includes("*")) {
-    return false;
-  }
-  return val.includes(".") && !val.startsWith(".") && !val.endsWith(".");
-}
-
-/**
- * Reject network patterns that are a sandbox escape dressed as a grant.
+ * `*`, `*.com` and a bare `*.*` each match every host on the internet, so
+ * allowing one hands the agent an unrestricted network — the exact thing the
+ * allowlist exists to prevent. That is worth an early, explanatory refusal.
  *
- * `srt` already refuses these in `allowedDomains`. Catching them here means the
- * message can name the repo and the offending entry, rather than arriving as a
- * schema complaint from `initialize()` after `ocs` has already resolved paths
- * and is about to start a proxy.
+ * This is deliberately *not* a reimplementation of srt's domain validator. A
+ * previous version of this file mirrored `isValidDomainPattern` so the check
+ * would agree exactly; it cost 55 lines that had to be kept in step with an
+ * upstream function we do not control, and any divergence would be a silent
+ * disagreement rather than a loud failure. Instead this checks only the property
+ * `ocs` has an opinion about — "does this name a host, or everything" — and lets
+ * `validateCompiledPolicy` run srt's own schema as the authority on the rest.
  *
- * Only unscoped patterns are rejected. `*.github.com` is a bounded grant and
- * stays legal — the documented risk of allowing github is a policy mistake, not
- * a bug, and not this tool's to overrule.
+ * Two layers is not redundancy: this one produces a message naming the repo that
+ * asked, and srt's runs last, on the compiled policy, before a proxy is started.
  */
 function rejectOverBroadNetworkGrants(domains: string[], source: string): void {
-  const overBroad = domains.filter((d) => !isUsableDomainPattern(d));
+  const escapes = domains.filter((d) => !namesSpecificHosts(d));
 
-  if (overBroad.length === 0) {
+  if (escapes.length === 0) {
     return;
   }
 
   throw new ConfigError(
-    `${source} requested network access that is an escape rather than a grant: ${overBroad.join(", ")}\n\n` +
-      "A pattern with no registrable domain to anchor it ('*', '*.com', 'localhost:') matches\n" +
-      "every host, so allowing it hands the agent an unrestricted network — which is the one\n" +
-      "thing the allowlist exists to prevent.\n\n" +
+    `${source} requested network access that is an escape rather than a grant: ${escapes.join(", ")}\n\n` +
+      "A pattern with no registrable domain to anchor it ('*', '*.com') matches every host, so\n" +
+      "allowing it hands the agent an unrestricted network — which is the one thing the allowlist\n" +
+      "exists to prevent.\n\n" +
       "Name the hosts you actually need:\n" +
-      '  ["*"]              → ["api.example.com", "*.example.com"]\n' +
-      '  ["*.com"]          → ["github.com", "*.github.com"]'
+      '  ["*"]       → ["api.example.com", "*.example.com"]\n' +
+      '  ["*.com"]   → ["github.com", "*.github.com"]\n\n' +
+      "A wildcard with two or more labels after it is a bounded grant and is allowed —\n" +
+      "'*.github.com' is not the same request as '*.com'."
   );
+}
+
+/**
+ * Does this pattern name a bounded set of hosts, or all of them?
+ *
+ * Only the wildcard cases are decided here; anything without a `*` is a
+ * candidate host and is srt's business to validate.
+ */
+function namesSpecificHosts(entry: string): boolean {
+  if (!entry.includes("*")) {
+    return true;
+  }
+
+  // `*.example.com` is bounded; `*`, `*.com` and `a.*.com` are not.
+  if (!entry.startsWith("*.")) {
+    return false;
+  }
+  const labels = entry.slice(2).split(".");
+  return labels.length >= 2 && labels.every((label) => label.length > 0);
+}
+
+/**
+ * Layer the user's host config over the built-in defaults.
+ *
+ * The host file is trusted, and trusted means two different things for scalars
+ * and for lists:
+ *
+ * - **A scalar** (`srt.mandatoryDenySearchDepth`, the `allow*` booleans) is
+ *   replaced. The user owns it; that is the entire point of a settings file, and
+ *   `false` has to be respected rather than read as "unset".
+ * - **A list** (`network.allow`, `protected.read`, `mounts.*`) is unioned with the
+ *   defaults. Mentioning a list means "add to this", never "this is now the whole
+ *   policy".
+ *
+ * That asymmetry is the whole design of the function, and it is why the file has
+ * no subtract syntax on any channel. There is exactly one place a user removes a
+ * default: editing the defaults themselves, or a future explicit deny/remove
+ * mechanism designed as its own feature. Silently losing protection is the one
+ * outcome worth engineering against.
+ *
+ * This exists because the previous `{ ...defaults, ...hostFile }` was wrong in a
+ * way that only showed up on the second key a user added. A shallow spread
+ * replaces a whole nested object, so a host file saying `protected.read:
+ * ["**\/*.tfstate"]` deleted the built-in `**\/.env` protection outright — a
+ * committed secret became readable because the user added an unrelated glob. Same
+ * for `mounts.read`, which lost `/usr` and opencode's own directories and left a
+ * sandbox with no userland. Silent weakening on an unrelated edit is the exact
+ * failure mode the rest of this file exists to prevent.
+ */
+export function applyHostConfig(
+  defaults: OcsConfig,
+  hostFile: Record<string, unknown>
+): OcsConfig {
+  const file = (hostFile ?? {}) as Partial<OcsConfig>;
+
+  return {
+    ...defaults,
+    // Every list is unioned, never replaced. A host file that mentions
+    // `protected.read` is adding a rule, not restating the whole policy, and
+    // treating it as a restatement is what made `**\/*.tfstate` silently delete
+    // the built-in `**\/.env` protection. The same applies to `mounts.read`:
+    // replacing it with `["/opt/some-tool"]` drops `/usr` and opencode's own
+    // directories, leaving a sandbox with no userland. A user adding one mount
+    // should not have to enumerate the other eleven.
+    network: {
+      allow: union(
+        defaults.network.allow,
+        file.network?.allow,
+        "network.allow"
+      ),
+      deny: union(defaults.network.deny, file.network?.deny, "network.deny"),
+    },
+    mounts: {
+      read: union(defaults.mounts.read, file.mounts?.read, "mounts.read"),
+      write: union(defaults.mounts.write, file.mounts?.write, "mounts.write"),
+    },
+    protected: {
+      read: union(
+        defaults.protected.read,
+        file.protected?.read,
+        "protected.read"
+      ),
+      write: union(
+        defaults.protected.write,
+        file.protected?.write,
+        "protected.write"
+      ),
+    },
+    // Scalars replace, including to `false`, so a user can turn a setting off.
+    srt:
+      file.srt === undefined ? defaults.srt : { ...defaults.srt, ...file.srt },
+  };
+}
+
+/**
+ * Union two lists, tolerating an absent one.
+ *
+ * A non-array on the file side is passed through rather than coerced. Spreading
+ * the string `"not-an-array"` would yield twelve one-character "domains" — the
+ * sort of thing that passes a length check and fails confusingly much later.
+ * Handing it on unchanged lets the schema reject it with a message about the
+ * actual mistake.
+ */
+function union(a: string[], b: string[] | undefined, key: string): string[] {
+  if (b === undefined) {
+    return a;
+  }
+  if (!Array.isArray(b)) {
+    // Fail closed here rather than coercing. Spreading `"not-an-array"` would
+    // yield twelve one-character "domains" — the sort of value that passes a
+    // length check and fails confusingly much later, at the proxy. Saying so
+    // now is also the difference between a message naming the bad key and a
+    // schema complaint about the wrong type in the wrong place.
+    throw new ConfigError(
+      `${HOME_CONFIG_HINT}\n\n` +
+        `"${key}" must be an array of strings, but it is ${describe(b)}.`
+    );
+  }
+  return [...new Set([...a, ...b])];
+}
+
+/** Where the user fixes a bad host file. Named once so it cannot drift. */
+const HOME_CONFIG_HINT =
+  "Fix ~/.config/ocs/config.json (or the file passed to --config).";
+
+function describe(value: unknown): string {
+  if (value === null) return "null";
+  if (Array.isArray(value)) return "an array";
+  return `a ${typeof value}`;
 }
 
 export async function mergeConfigs(

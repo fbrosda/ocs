@@ -154,17 +154,10 @@ describe("containment edge cases", () => {
   });
 
   describe("rejected: malformed", () => {
-    // None of these escape on Linux — a backslash is an ordinary character in a
-    // filename — which is precisely why they matter. They land in a security
-    // policy looking like traversal and staying inert only for as long as
-    // nothing else re-parses them.
-    const malformed = [
-      "",
-      "a\0b",
-      "..\\..\\etc",
-      "C:\\Windows",
-      "C:\\Windows\\System32",
-    ];
+    // Neither of these can mean anything useful. A NUL byte is never a valid
+    // filename character, and "" is never a path — both reach downstream as
+    // something other than what they say.
+    const malformed = ["", "a\0b"];
 
     for (const bad of malformed) {
       it(`rejects ${JSON.stringify(bad)} from a project config`, async () => {
@@ -183,6 +176,36 @@ describe("containment edge cases", () => {
     it("explains why rather than just refusing", async () => {
       await expect(merge({ mounts: { read: ["a\0b"] } })).rejects.toThrow(
         /NUL byte/
+      );
+    });
+  });
+
+  describe("backslash and drive letters are left alone", () => {
+    // Both are valid Unix filenames, and both platforms ocs targets are POSIX.
+    // Refusing them would break real configuration without making anything
+    // safer: the containment gate already judges `..\\..\\etc` correctly because
+    // it is one ordinary filename component.
+    it("accepts a backslash in a project path", async () => {
+      const odd = path.join(project, "weird\\name");
+      fs.mkdirSync(odd);
+
+      const { config } = await merge({
+        mounts: { read: ["weird\\name"] },
+      });
+
+      expect(config.mounts.read).toContain(odd);
+    });
+
+    it("still contains a backslash traversal rather than granting it", async () => {
+      // The point of not rejecting the spelling: containment, not syntax, is
+      // what decides. `..\\..\\etc` is a filename, not a traversal, so it stays
+      // inside the project.
+      const { config } = await merge({
+        mounts: { read: ["..\\..\\etc"] },
+      });
+
+      expect(config.mounts.read).toContain(
+        path.resolve(project, "..\\..\\etc")
       );
     });
   });

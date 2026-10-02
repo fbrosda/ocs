@@ -4,6 +4,7 @@ import * as path from "path";
 import * as fs from "fs";
 import * as os from "os";
 import {
+  applyHostConfig,
   CliGrants,
   loadJsonConfig,
   mergeConfigs,
@@ -115,10 +116,12 @@ program
           process.exit(1);
         }
 
-        const hostConfig = {
-          ...getDefaultHostConfig(),
-          ...loadJsonConfig(getHomeConfigPath()),
-        };
+        // Additively, per key — see applyHostConfig below for why a shallow
+        // spread was quietly deleting the built-in credential protection.
+        const hostConfig = applyHostConfig(
+          getDefaultHostConfig(),
+          loadJsonConfig(getHomeConfigPath())
+        );
         const projectConfigPath =
           options.config ?? getDefaultProjectConfig(projectPath);
         const projectConfig = loadJsonConfig(projectConfigPath);
@@ -251,12 +254,20 @@ program
       return;
     }
 
+    // The built-in zero-config providers are already in here; inference adds to
+    // them rather than replacing them. The four defaults are the ones a new user
+    // reaches anyway, and `opencode auth login` handles their credentials, so
+    // seeding them here means the file works before anyone edits it.
     const config = getDefaultHostConfig();
-    const inferred = inferProviderDomains();
+    const inferred = inferProviderDomains().filter(
+      (d) => !config.network.allow.includes(d)
+    );
 
     if (inferred.length > 0) {
-      config.network.allow = inferred;
-      console.log("Inferred network allow from your existing opencode config:");
+      config.network.allow = [...config.network.allow, ...inferred].sort();
+      console.log(
+        "Inferred additional network allow from your existing opencode config:"
+      );
       for (const domain of inferred) {
         console.log(`  ${domain}`);
       }
@@ -265,15 +276,16 @@ program
       );
     } else {
       console.log(
-        "Could not infer any provider domains from ~/.config/opencode/opencode.json."
-      );
-      console.log(
-        "An empty network.allow means the agent cannot call any model, so you will need to"
-      );
-      console.log(
-        `add the hosts you use to ${homeConfigPath} before the sandbox is usable.`
+        "No additional provider domains found in ~/.config/opencode/opencode.json."
       );
     }
+
+    console.log(
+      "\nSeeded with the providers that work with no setup (opencode auth login). Delete"
+    );
+    console.log(
+      "any you do not use, or add the hosts you need — this list is yours to edit."
+    );
 
     fs.writeFileSync(homeConfigPath, `${JSON.stringify(config, null, 2)}\n`);
     console.log(`\nCreated ${homeConfigPath}`);

@@ -179,11 +179,39 @@ describe("adversarial cases", () => {
       ).rejects.toThrow(ConfigError);
     });
 
+    it("rejects wildcard shapes that name no bounded host set", async () => {
+      // The shapes that are easy to write and easy to wave through: `a.*.com`
+      // looks scoped, `*.*` looks like a pattern, and `*.` looks like a typo that
+      // a careless matcher would treat as everything.
+      for (const escape of ["a.*.com", "*.*", "*.", "*..com", "*.example."]) {
+        await expect(merge({ network: { allow: [escape] } })).rejects.toThrow(
+          ConfigError
+        );
+      }
+    });
+
     it("accepts a scoped wildcard", async () => {
       // `*.github.com` is a real grant to a bounded set of hosts, and the
       // documented risk of it is a policy mistake rather than a bug.
       const { config } = await merge({ network: { allow: ["*.github.com"] } });
       expect(config.network.allow).toContain("*.github.com");
+    });
+
+    it("passes non-wildcard entries through to the runtime's own validation", async () => {
+      // `localhost` and a bare IPv6 literal are host entries the early check has
+      // no opinion about. They used to be reimplemented here; now they reach the
+      // compiled policy and are judged by srt's schema, which is the authority.
+      // What this asserts is that we are not *over*-rejecting on the way past.
+      const { config } = await merge({
+        network: { allow: ["localhost", "[::1]", "api.example.com:8443"] },
+      });
+
+      expect(config.network.allow).toEqual([
+        "opencode.ai",
+        "localhost",
+        "[::1]",
+        "api.example.com:8443",
+      ]);
     });
 
     it("allows a project to add a deny but never to subtract one", async () => {
@@ -225,7 +253,7 @@ describe("adversarial cases", () => {
       const { config } = await merge({ protected: { read: ["**/.env"] } });
 
       expect(config.protected.read).toEqual(
-        expect.arrayContaining(["**/.env", "**/id_rsa*"])
+        expect.arrayContaining(["**/.env", "**/.netrc"])
       );
     });
 

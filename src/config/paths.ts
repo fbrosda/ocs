@@ -104,18 +104,18 @@ export function getSystemReadDirs(): string[] {
 /**
  * The roots a relative read-deny glob is anchored to.
  *
- * A credential pattern is only meaningful where the sandbox can actually
- * create or read a file, which is to say inside the project (the repository
- * you just cloned — the actual threat) and inside opencode's own state
- * directories. Anchoring further out would mean walking all of `/tmp` on every
- * launch to defend against a file nobody put there; a host config that really
- * wants a location covered can spell the pattern absolutely.
+ * The project only, and that is a measured decision rather than a cautious one.
+ * Anchoring there too — opencode's own state directories, `/tmp` — was tried and
+ * removed: a scan of all four opencode directories found zero matches for any
+ * pattern in the defaults, so those anchors cost 52 entries in the compiled
+ * policy and protected nothing. `/tmp` would mean walking all of it on every
+ * launch to defend against a file nobody put there.
+ *
+ * A host config that really does want a location covered can spell the pattern
+ * absolutely, and an absolute pattern is passed through untouched.
  */
 export function getDenyReadAnchors(projectPath: string): string[] {
-  return [
-    normalizePath(projectPath),
-    ...getOpencodeBaseDirs().map(normalizePath),
-  ];
+  return [normalizePath(projectPath)];
 }
 
 export function getHomeConfigPath(): string {

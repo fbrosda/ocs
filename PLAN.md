@@ -4,8 +4,44 @@ Companion to [README.md](README.md), which is the specification. This document
 covers sequencing, the unknowns worth burning down early, and the decisions that
 are already made so they don't get relitigated.
 
-Status: pre-alpha. Core implementation done. Unit tests passing (85/85), integration
+Status: pre-alpha. Core implementation done. Unit tests passing (92/92), integration
 tests passing (6/6, needs `bwrap`). Build, type check, lint and format all clean.
+
+### Defaults, and how they got smaller
+
+Two rounds of questioning the defaults produced measured cuts rather than
+guesses. Both are recorded here because "we tried the longer version and removed
+it" is the kind of thing that otherwise gets re-added by the next person who
+thinks they are being thorough.
+
+**Credential globs: 13 patterns × 5 anchors → 5 patterns × 1 anchor.**
+`denyRead` went from 66 entries to 6. The anchoring code stayed because the
+project anchor is load-bearing — verified by running the sandbox both ways with
+`protected.read` emptied, where `cat .env` returned `TOKEN=secret`. Denying `~`
+does not cover a `.env` in the project, because the project is inside `~` and
+`allowRead` re-opens the whole subtree. What was removed was the four opencode
+state directories: a scan of all four found zero matches for every default
+pattern, so they cost 52 entries and protected nothing. Also dropped from the
+list: `*.pem`, `*.p12`, `*.key`, `id_rsa*`, `credentials.json`,
+`service-account*.json`, `.htpasswd` — filenames that are guesses about a repo we
+cannot know.
+
+**Network defaults: empty → `opencode.ai` only.** Not anthropic/openai/copilot
+despite those also supporting `opencode auth login`: reaching a paid API host by
+default is a wider grant than "you can try this" needs. `ocs init` reads the
+user's own opencode config and seeds what they already use, so the common case
+stays one command with no editing. The ~200 providers in opencode's cache all
+require pasting a key first, which is not the zero-config case.
+
+**A real bug found on the way: the host config shallow-spread over the
+defaults.** `{ ...defaults, ...hostFile }` replaces a whole nested object, so a
+host file saying `protected.read: ["**\/*.tfstate"]` deleted the built-in
+`**\/.env` protection, and `mounts.read: ["/opt/tool"]` deleted `/usr` and
+opencode's own directories. Silent weakening, triggered by an unrelated edit, and
+only visible on the *second* key a user added. Fixed in `applyHostConfig`, which
+unions every list and replaces only scalars. There is now no subtract syntax on
+any channel — host, project or CLI — and that is a deliberate constraint rather
+than a missing feature.
 
 ---
 
@@ -166,7 +202,8 @@ correct, fully-resolved, provenance-annotated JSON. Fully unit-tested.
 | `project/../../etc` | rejected |
 | `~/.npm/_cacache` passed via `-m` on the CLI | accepted (user-typed, trusted path) |
 | same, in project config | rejected |
-| Windows-style separators, NUL bytes, empty string | rejected |
+| NUL bytes, empty string | rejected |
+| backslashes, Windows drive letters | **accepted** — both are valid Unix filenames, and containment is what decides (a `..\..\etc` spelling is one filename component, so it stays inside the project). Earlier drafts rejected these, guarding a Windows parsing difference that does not exist on either target. Windows is out of scope per open question 4; revisit if that changes. |
 
 ### M2 — Execution
 
