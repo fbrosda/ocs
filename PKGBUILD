@@ -36,14 +36,14 @@ build() {
   # `npm ci` rather than `npm install`: it installs the lockfile exactly and
   # wipes any node_modules that happens to be lying around, so the build cannot
   # pick up a package the lockfile does not name.
-  npm ci
+  #
+  # `--ignore-scripts`: nothing here needs a lifecycle script. TypeScript is
+  # invoked through `npm run build`, and no production dependency ships a
+  # preinstall/install/postinstall. Running them as the build user on every
+  # makepkg is reproducibility handed away for nothing.
+  npm ci --ignore-scripts
 
   npm run build
-
-  # Everything needed at runtime is a production dependency, so the dev tree
-  # (typescript, vitest, eslint — about 100MB of it) has no business in the
-  # package. srt's own dependencies stay: they are production dependencies.
-  npm prune --omit=dev
 }
 
 check() {
@@ -60,11 +60,40 @@ check() {
 package() {
   cd "$startdir"
 
+  # The prune is here, not in check(), because `makepkg --nocheck` skips
+  # check() entirely — which would package the whole dev tree (typescript,
+  # vitest, eslint: about 100MB of it). Nothing needed at runtime is a
+  # devDependency; srt's own dependencies stay, they are production ones.
+  npm prune --omit=dev
+
   # Everything the runtime touches at execution time: the compiled CLI and the
-  # dependency tree that sits beside it. The bin directory comes first so the
-  # wrapper is on PATH ahead of anything else.
-  install -dm755 "$srcdir/dist" "$pkgdir/usr/lib/ocs/dist"
-  install -dm755 "$srcdir/node_modules" "$pkgdir/usr/lib/ocs/node_modules"
+  # dependency tree that sits beside it, under /usr/lib/ocs.
+  #
+  # `cp -a`, not `install`: the tree is directories all the way down, it
+  # contains relative symlinks (`node_modules/.bin/srt`), and it contains
+  # executables — srt's apply-seccomp and its own dist/cli.js. `install`
+  # dereferences the symlinks, refuses the directories, and takes the exec bits
+  # off with -m 644.
+  #
+  # install -d first because `cp -a a b dest/` copies *into* dest and requires
+  # it to exist; without it the copy fails outright rather than creating it.
+  install -d -m755 "$pkgdir/usr/lib/ocs"
+  cp -a dist node_modules "$pkgdir/usr/lib/ocs/"
+
+  # Declarations exist to typecheck source trees. Nothing at runtime opens one,
+  # and npm's node_modules/.package-lock.json records per-package *tarball*
+  # integrity rather than a file list, so nothing downstream notices either.
+  #
+  # A rule, not a list of paths: a dependency shipping more, fewer or
+  # differently-named declarations next release needs no edit here. `*.d.ts`
+  # alone is not enough — zod v4 ships 212 `.d.cts`, a third of the payload.
+  #
+  # Scoped to $pkgdir and never to $startdir: this is a VCS build, so
+  # $startdir is the user's own checkout, and check() has already run the test
+  # suite against it.
+  find "$pkgdir/usr/lib/ocs" -type f \
+    \( -name '*.d.ts' -o -name '*.d.ts.map' -o -name '*.d.cts' -o -name '*.d.mts' \) \
+    -delete
 
   install -Dm644 package.json "$pkgdir/usr/lib/ocs/package.json"
   install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
@@ -75,19 +104,22 @@ package() {
   # node_modules relative to its own real path (`createRequire(import.meta.url)`
   # in src/sandbox/seccomp.ts) — the same reason it has to be a real path rather
   # than a $PATH lookup that happens to work.
-  install -dm755 /dev/stdin "$pkgdir/usr/bin/ocs" <<'EOF'
-#!/bin/sh
-exec /usr/bin/node /usr/lib/ocs/dist/cli.js "$@"
-EOF
+  install -Dm755 ocs "$pkgdir/usr/bin/ocs"
 
-  # The seccomp helper that blocks AF_UNIX is inside node_modules and is not
-  # executable-by-default in some archives; make sure it survived the prune and
-  # is executable, because ocs refuses to start without it rather than running
-  # with unblocked sockets.
-  local seccomp
+  # Assert, do not chmod. `cp -a` above carries modes over verbatim, so if the
+  # exec bit is not there now it is because the prune dropped the file or npm
+  # shipped it wrong — and patching the mode would hide that. ocs refuses to
+  # start without this binary rather than running with unblocked AF_UNIX
+  # (src/sandbox/seccomp.ts), so a package that loses it fails at first use,
+  # far from the build that caused it.
+  local seccomp found=
   for seccomp in "$pkgdir"/usr/lib/ocs/node_modules/@anthropic-ai/sandbox-runtime/vendor/seccomp/*/apply-seccomp; do
-    if [[ -e $seccomp ]]; then
-      chmod 755 "$seccomp"
+    if [[ -x $seccomp ]]; then
+      found=1
     fi
   done
+  if [[ -z $found ]]; then
+    echo "apply-seccomp is missing or not executable in \$pkgdir; refusing to package ocs without it" >&2
+    return 1
+  fi
 }

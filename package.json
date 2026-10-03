@@ -19,7 +19,7 @@
     "darwin"
   ],
   "scripts": {
-    "build": "tsc && chmod +x dist/cli.js",
+    "build": "tsc",
     "test": "vitest run",
     "test:int": "vitest run --config vitest.integration.config.ts",
     "dev": "tsx src/cli.ts",
